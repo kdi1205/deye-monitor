@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5kW 목업 모니터링</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --bg:#F6F7F4; --panel:#FFFFFF; --ink:#1E2A26; --mut:#6B7A74; --line:#E1E6E2;
+    --pv:#D08A1E; --bat:#1E8A5F; --load:#2F6BC4; --warn:#C0392B; --ok:#1E8A5F;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#141A17; --panel:#1C2420; --ink:#E7ECE9; --mut:#93A09A; --line:#2B3630;
+    }
+  }
+  :root[data-theme="dark"]{ --bg:#141A17; --panel:#1C2420; --ink:#E7ECE9; --mut:#93A09A; --line:#2B3630; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans KR",system-ui,sans-serif;font-size:15px;line-height:1.5}
+  header{padding:20px 16px 8px;max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline}
+  h1{font-size:20px;font-weight:600;margin:0}
+  .sub{color:var(--mut);font-size:13px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12.5px;border:1px solid var(--line);background:var(--panel)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--warn)}
+  main{max-width:1180px;margin:0 auto;padding:8px 16px 40px;display:grid;gap:14px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .card .k{font-size:12.5px;color:var(--mut);letter-spacing:.02em}
+  .card .v{font-family:"IBM Plex Mono",monospace;font-size:28px;font-weight:500;font-variant-numeric:tabular-nums;margin-top:2px}
+  .card .u{font-size:13px;color:var(--mut);margin-left:3px}
+  .card .s{font-size:12px;color:var(--mut);margin-top:4px}
+  .card.pv .v{color:var(--pv)} .card.bat .v{color:var(--bat)} .card.load .v{color:var(--load)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .panel h2{font-size:14px;font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;align-items:baseline}
+  .panel h2 span{font-weight:400;color:var(--mut);font-size:12.5px}
+  .chart{position:relative;height:300px}
+  .chart.short{height:220px}
+  .alert{border-left:4px solid var(--warn);background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:10px;padding:10px 14px;font-size:13.5px;display:none}
+  .alert.show{display:block}
+  details summary{cursor:pointer;color:var(--mut);font-size:13px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;font-family:"IBM Plex Mono",monospace}
+  td,th{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{color:var(--mut);font-weight:500}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:800px){.grid2{grid-template-columns:1fr}.card .v{font-size:24px}}
+  footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;color:var(--mut);font-size:12px}
+  .btn{font:inherit;font-size:12.5px;padding:3px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+  .btn:hover{border-color:var(--mut)}
+  .btn:focus-visible,.lock input:focus-visible{outline:2px solid var(--load);outline-offset:2px}
+  .lock{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;z-index:10}
+  .lock[hidden]{display:none}
+  .lock form{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;display:grid;gap:12px}
+  .lock h2{margin:0;font-size:17px;font-weight:600}
+  .lock p{margin:0;color:var(--mut);font-size:13px;word-break:keep-all}
+  .lock input[type=password]{font:inherit;font-size:15px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);width:100%}
+  .lock label.rem{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--mut)}
+  .lock button[type=submit]{font:inherit;font-weight:600;padding:9px 12px;border-radius:9px;border:0;background:var(--bat);color:#fff;cursor:pointer}
+  .lock button[disabled]{opacity:.6;cursor:progress}
+  .lock .err{color:var(--warn);font-size:13px;min-height:1.2em}
+  a{color:inherit}
+</style>
+</head>
+<body>
+<div class="lock" id="lock">
+  <form id="lockForm" autocomplete="off">
+    <h2>5kW 목업 모니터링</h2>
+    <p>데이터가 암호화되어 있습니다. 비밀번호를 입력하세요.</p>
+    <input type="password" id="pw" placeholder="비밀번호" autocomplete="current-password" required>
+    <label class="rem"><input type="checkbox" id="remember" checked> 이 브라우저에서 기억</label>
+    <button type="submit" id="unlockBtn">열기</button>
+    <div class="err" id="lockErr" role="alert"></div>
+  </form>
+</div>
+<header>
+  <h1>5kW 목업 모니터링</h1>
+  <span class="sub" id="station">발전소 —</span>
+  <span class="pill"><span class="dot" id="dot"></span><span id="online">연결 확인 중</span></span>
+  <span class="pill">데이터 시각 <span id="dataTime" style="margin-left:4px">—</span></span>
+  <span class="pill">수집 <span id="updatedAt" style="margin-left:4px">—</span></span>
+  <button class="btn" id="lockBtn" type="button" title="이 브라우저에 저장된 비밀번호를 지우고 화면을 잠급니다">잠그기</button>
+</header>
+
+<main>
+  <div class="alert" id="alert"></div>
+
+  <section class="cards">
+    <div class="card pv"><div class="k">PV 발전</div><div><span class="v" id="pvPower">—</span><span class="u">W</span></div><div class="s" id="pvDetail">PV1 — · PV2 —</div></div>
+    <div class="card bat"><div class="k">배터리 SOC</div><div><span class="v" id="soc">—</span><span class="u">%</span></div><div class="s" id="batDetail">— V · — W</div></div>
+    <div class="card load"><div class="k">부하</div><div><span class="v" id="loadPower">—</span><span class="u">W</span></div><div class="s" id="loadDetail">— V · — Hz</div></div>
+    <div class="card pv"><div class="k">오늘 발전량</div><div><span class="v" id="pvToday">—</span><span class="u">kWh</span></div><div class="s" id="pvTotal">누적 — kWh</div></div>
+    <div class="card load"><div class="k">오늘 소비량</div><div><span class="v" id="loadToday">—</span><span class="u">kWh</span></div><div class="s" id="chgToday">충전 — · 방전 — kWh</div></div>
+    <div class="card bat"><div class="k">배터리 온도</div><div><span class="v" id="batTemp">—</span><span class="u">°C</span></div><div class="s" id="invTemp">인버터 DC — · AC — °C</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>오늘 (5분 간격) <span id="todayLabel"></span></h2>
+    <div class="chart"><canvas id="chartToday"></canvas></div>
+  </section>
+
+  <div class="grid2">
+    <section class="panel">
+      <h2>최근 30일 발전·소비 <span>kWh/일</span></h2>
+      <div class="chart short"><canvas id="chartDaily"></canvas></div>
+    </section>
+    <section class="panel">
+      <h2>배터리 전압·온도 (오늘)</h2>
+      <div class="chart short"><canvas id="chartBat"></canvas></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <details>
+      <summary>인버터가 보낸 모든 측정값 보기 (raw)</summary>
+      <div style="overflow-x:auto;margin-top:8px"><table id="rawTable"><thead><tr><th>key</th><th>value</th><th>unit</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </section>
+</main>
+<footer>Deye Cloud OpenAPI → GitHub Actions(5분) → GitHub Pages. 인버터 측정값은 운영 참고용이며 계량 근거가 아닙니다. 화면은 60초마다 자동 갱신됩니다.</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const fmt = (v, d=0) => (v===null||v===undefined||Number.isNaN(v)) ? '—' : Number(v).toLocaleString('ko-KR',{maximumFractionDigits:d,minimumFractionDigits:d});
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const bust = () => '?_=' + Math.floor(Date.now()/30000);
+  const kstDay = (offset=0) => { const d=new Date(Date.now()+9*3600e3+offset*86400e3); return d.toISOString().slice(0,10); };
+
+  let chartToday, chartDaily, chartBat;
+
+  // ── 암호화 (collector.py 와 같은 형식: AES-256-GCM, PBKDF2-SHA256, AAD = 파일 경로) ──
+  const ENC_TAG = 'aesgcm-pbkdf2-v1', CHECK_TEXT = 'deye-monitor-ok';
+  const te = new TextEncoder(), td = new TextDecoder();
+  const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const b64e = b => btoa(String.fromCharCode(...new Uint8Array(b)));
+  let KEY = null, META = null;
+  const store = {
+    get(k){ try{ return localStorage.getItem(k) || sessionStorage.getItem(k); }catch(e){ return null; } },
+    set(k,v,persist){ try{ (persist?localStorage:sessionStorage).setItem(k,v); }catch(e){} },
+    del(k){ try{ localStorage.removeItem(k); sessionStorage.removeItem(k); }catch(e){} },
+  };
+  const storeKey = () => 'deyeKey:' + (META ? META.salt : '');
+
+  async function rawFetch(path){
+    const r = await fetch(path + bust(), {cache:'no-store'});
+    if(!r.ok) throw new Error(path+' '+r.status);
+    return r.json();
+  }
+  async function decryptEnv(env, aad, key){
+    const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64d(env.iv), additionalData:te.encode(aad)}, key || KEY, b64d(env.ct));
+    return td.decode(pt);
+  }
+  async function deriveKey(pass){
+    const base = await crypto.subtle.importKey('raw', te.encode(pass.normalize('NFC')), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({name:'PBKDF2', salt:b64d(META.salt), iterations:META.iter, hash:'SHA-256'},
+      base, {name:'AES-GCM', length:256}, true, ['decrypt']);
+  }
+  async function keyOk(key){
+    try{ return (await decryptEnv(META.check, 'check', key)) === CHECK_TEXT; }catch(e){ return false; }
+  }
+  async function getJSON(path){
+    const obj = await rawFetch(path);
+    if(obj && obj.enc === ENC_TAG){
+      if(!KEY) throw new Error('locked');
+      try{ return JSON.parse(await decryptEnv(obj, path)); }
+      catch(e){ showLock('비밀번호가 바뀌었거나 데이터를 풀 수 없습니다. 다시 입력하세요.'); throw e; }
+    }
+    return obj;
+  }
+  function showLock(msg){
+    KEY = null; store.del(storeKey());
+    $('lock').hidden = false; $('lockErr').textContent = msg || ''; $('pw').value=''; $('pw').focus();
+  }
+  async function tryStoredKey(){
+    const raw = store.get(storeKey());
+    if(!raw) return false;
+    try{
+      const k = await crypto.subtle.importKey('raw', b64d(raw), {name:'AES-GCM'}, true, ['decrypt']);
+      if(await keyOk(k)){ KEY = k; return true; }
+    }catch(e){}
+    store.del(storeKey()); return false;
+  }
+
+  function setStatus(L){
+    const st = L.status || {};
+    const ok = st.ok && st.logger_online;
+    $('dot').className = 'dot ' + (st.ok ? (st.logger_online ? 'ok' : 'bad') : 'bad');
+    $('online').textContent = !st.ok ? '수집 실패' : (st.logger_online ? '로거 온라인' : `로거 데이터 ${fmt(st.data_age_min)}분 전`);
+    $('dataTime').textContent = st.data_time ? st.data_time.replace('T',' ').slice(5,16) : '—';
+    $('updatedAt').textContent = L.updated_at ? L.updated_at.replace('T',' ').slice(5,16) : '—';
+    $('station').textContent = (L.station && L.station.name ? L.station.name : '발전소') + (L.device && L.device.sn ? ' · ' + L.device.sn : '');
+    const a = $('alert');
+    if(!st.ok){ a.textContent = `수집 실패 ${st.consecutive_failures||1}회 연속 — ${st.error||''}  (마지막 성공 데이터를 표시 중)`; a.classList.add('show'); }
+    else if(!st.logger_online){ a.textContent = `로거 데이터가 ${fmt(st.data_age_min)}분 동안 갱신되지 않았습니다. 인버터 Wi-Fi 또는 공유기를 확인하세요.`; a.classList.add('show'); }
+    else a.classList.remove('show');
+  }
+
+  function setCards(L){
+    const d = L.data || {};
+    $('pvPower').textContent = fmt(d.pv_power_w);
+    $('pvDetail').textContent = `PV1 ${fmt(d.pv1_power_w)} W · PV2 ${fmt(d.pv2_power_w)} W  (${fmt(d.pv1_voltage_v)} / ${fmt(d.pv2_voltage_v)} V)`;
+    $('soc').textContent = fmt(d.battery_soc_pct);
+    const bp = d.battery_power_w;
+    $('batDetail').textContent = `${fmt(d.battery_voltage_v,1)} V · ${fmt(Math.abs(bp||0))} W ${bp>0?'방전':bp<0?'충전':''}`;
+    $('loadPower').textContent = fmt(d.load_power_w);
+    $('loadDetail').textContent = `${fmt(d.load_voltage_v,1)} V · ${fmt(d.ac_frequency_hz,2)} Hz`;
+    $('pvToday').textContent = fmt(d.pv_today_kwh,1);
+    $('pvTotal').textContent = `누적 ${fmt(d.pv_total_kwh,1)} kWh`;
+    $('loadToday').textContent = fmt(d.load_today_kwh,1);
+    $('chgToday').textContent = `충전 ${fmt(d.charge_today_kwh,1)} · 방전 ${fmt(d.discharge_today_kwh,1)} kWh`;
+    $('batTemp').textContent = fmt(d.battery_temp_c,1);
+    $('invTemp').textContent = `인버터 DC ${fmt(d.inverter_temp_dc_c,1)} · AC ${fmt(d.inverter_temp_ac_c,1)} °C`;
+    const tb = $('rawTable').querySelector('tbody'); tb.innerHTML='';
+    const raw = L.raw || {}, units = L.units || {};
+    Object.keys(raw).sort().forEach(k => { const tr=document.createElement('tr'); tr.innerHTML=`<td>${k}</td><td>${raw[k]}</td><td>${units[k]||''}</td>`; tb.appendChild(tr); });
+  }
+
+  function baseOpts(){
+    const ink = css('--ink'), mut = css('--mut'), line = css('--line');
+    Chart.defaults.color = mut; Chart.defaults.borderColor = line; Chart.defaults.font.family = '"IBM Plex Sans KR", system-ui, sans-serif';
+    return { responsive:true, maintainAspectRatio:false, animation:false, interaction:{mode:'index',intersect:false},
+      plugins:{legend:{labels:{boxWidth:10,boxHeight:10,usePointStyle:true}}, tooltip:{callbacks:{}}},
+      elements:{point:{radius:0}, line:{borderWidth:1.8, tension:0.25}} };
+  }
+
+  function drawToday(rows){
+    const labels = rows.map(r=>r.t);
+    const ds = [
+      {label:'PV W', data:rows.map(r=>r.pv_power_w), borderColor:css('--pv'), backgroundColor:css('--pv')+'22', fill:true, yAxisID:'y'},
+      {label:'부하 W', data:rows.map(r=>r.load_power_w), borderColor:css('--load'), yAxisID:'y'},
+      {label:'배터리 W (+방전)', data:rows.map(r=>r.battery_power_w), borderColor:css('--mut'), borderDash:[4,3], yAxisID:'y'},
+      {label:'SOC %', data:rows.map(r=>r.battery_soc_pct), borderColor:css('--bat'), yAxisID:'y2', borderWidth:2.2},
+    ];
+    const o = baseOpts();
+    o.scales = { x:{ticks:{maxTicksLimit:12}}, y:{title:{display:true,text:'W'},beginAtZero:true}, y2:{position:'right',min:0,max:100,title:{display:true,text:'SOC %'},grid:{drawOnChartArea:false}} };
+    if(chartToday) chartToday.destroy();
+    chartToday = new Chart($('chartToday'), {type:'line', data:{labels, datasets:ds}, options:o});
+    $('todayLabel').textContent = kstDay() + ' · ' + rows.length + '점';
+  }
+
+  function drawBat(rows){
+    const labels = rows.map(r=>r.t);
+    const o = baseOpts();
+    o.scales = { x:{ticks:{maxTicksLimit:8}}, y:{title:{display:true,text:'V'}}, y2:{position:'right',title:{display:true,text:'°C'},grid:{drawOnChartArea:false}} };
+    if(chartBat) chartBat.destroy();
+    chartBat = new Chart($('chartBat'), {type:'line', data:{labels, datasets:[
+      {label:'배터리 전압 V', data:rows.map(r=>r.battery_voltage_v), borderColor:css('--bat'), yAxisID:'y'},
+      {label:'배터리 온도 °C', data:rows.map(r=>r.battery_temp_c), borderColor:css('--warn'), yAxisID:'y2'},
+    ]}, options:o});
+  }
+
+  function drawDaily(daily){
+    const days = Object.keys(daily).sort().slice(-30);
+    const o = baseOpts();
+    o.scales = { x:{ticks:{maxTicksLimit:10, callback:(v,i)=>days[i].slice(5)}}, y:{beginAtZero:true,title:{display:true,text:'kWh'}} };
+    if(chartDaily) chartDaily.destroy();
+    chartDaily = new Chart($('chartDaily'), {type:'bar', data:{labels:days, datasets:[
+      {label:'발전', data:days.map(d=>daily[d].pv_today_kwh??null), backgroundColor:css('--pv')},
+      {label:'소비', data:days.map(d=>daily[d].load_today_kwh??null), backgroundColor:css('--load')},
+    ]}, options:o});
+  }
+
+  async function refreshLatest(){
+    try{ const L = await getJSON('data/latest.json'); setStatus(L); setCards(L); }
+    catch(e){ $('online').textContent='latest.json 없음'; $('dot').className='dot bad'; console.warn(e); }
+  }
+  async function refreshHistory(){
+    try{
+      let rows = [];
+      try{ rows = await getJSON('data/history/'+kstDay()+'.json'); }
+      catch(e){ rows = await getJSON('data/history/'+kstDay(-1)+'.json').catch(()=>[]); }
+      drawToday(rows); drawBat(rows);
+    }catch(e){ console.warn(e); }
+    try{ drawDaily(await getJSON('data/daily.json')); }catch(e){ console.warn(e); }
+  }
+
+  let started = false;
+  function start(){
+    $('lock').hidden = true;
+    refreshLatest(); refreshHistory();
+    if(started) return; started = true;
+    setInterval(() => { if(KEY || !META) refreshLatest(); }, 60*1000);
+    setInterval(() => { if(KEY || !META) refreshHistory(); }, 5*60*1000);
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refreshHistory);
+  }
+
+  $('lockForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const btn = $('unlockBtn'); btn.disabled = true; btn.textContent = '확인 중…'; $('lockErr').textContent = '';
+    try{
+      const k = await deriveKey($('pw').value);
+      if(await keyOk(k)){
+        KEY = k;
+        store.set(storeKey(), b64e(await crypto.subtle.exportKey('raw', k)), $('remember').checked);
+        start();
+      }else{
+        $('lockErr').textContent = '비밀번호가 맞지 않습니다.';
+        $('pw').select();
+      }
+    }catch(e){ $('lockErr').textContent = '확인 중 오류: ' + e.message; }
+    btn.disabled = false; btn.textContent = '열기';
+  });
+  $('lockBtn').addEventListener('click', () => showLock('잠갔습니다.'));
+
+  (async function init(){
+    try{ META = await rawFetch('data/key.json'); }catch(e){ META = null; }
+    if(!META || !META.check){ $('lockBtn').hidden = true; start(); return; }   // 암호화 안 된 데이터
+    if(!window.crypto || !crypto.subtle){ showLock('이 브라우저는 암호 해제를 지원하지 않습니다 (https 주소로 접속하세요).'); return; }
+    if(await tryStoredKey()) start(); else showLock();
+  })();
+})();
+</script>
+</body>
+</html>

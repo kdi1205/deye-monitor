@@ -4,120 +4,160 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>5kW 목업 모니터링</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <style>
+  /* 무채색 + 색 3개: PV(호박), 부하(파랑), 경고(빨강 — 오류·오프라인일 때만) */
   :root{
-    --bg:#F6F7F4; --panel:#FFFFFF; --ink:#1E2A26; --mut:#6B7A74; --line:#E1E6E2;
-    --pv:#D08A1E; --bat:#1E8A5F; --load:#2F6BC4; --warn:#C0392B; --ok:#1E8A5F;
+    --bg:#F6F6F6; --panel:#FFFFFF; --ink:#171717; --sub:#525252; --mut:#8A8A8A; --line:#E6E6E6; --soft:#F0F0F0;
+    --pv:#D4961C; --load:#3D6FD6; --warn:#D14343;
   }
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
-      --bg:#141A17; --panel:#1C2420; --ink:#E7ECE9; --mut:#93A09A; --line:#2B3630;
+      --bg:#111111; --panel:#181818; --ink:#EDEDED; --sub:#BDBDBD; --mut:#8C8C8C; --line:#2A2A2A; --soft:#202020;
+      --pv:#E3AE47; --load:#7097EA; --warn:#E36A6A;
     }
   }
-  :root[data-theme="dark"]{ --bg:#141A17; --panel:#1C2420; --ink:#E7ECE9; --mut:#93A09A; --line:#2B3630; }
+  :root[data-theme="dark"]{
+    --bg:#111111; --panel:#181818; --ink:#EDEDED; --sub:#BDBDBD; --mut:#8C8C8C; --line:#2A2A2A; --soft:#202020;
+    --pv:#E3AE47; --load:#7097EA; --warn:#E36A6A;
+  }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans KR",system-ui,sans-serif;font-size:15px;line-height:1.5}
-  header{padding:20px 16px 8px;max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline}
-  h1{font-size:20px;font-weight:600;margin:0}
-  .sub{color:var(--mut);font-size:13px}
-  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12.5px;border:1px solid var(--line);background:var(--panel)}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
-  .dot.ok{background:var(--ok)} .dot.bad{background:var(--warn)}
-  main{max-width:1180px;margin:0 auto;padding:8px 16px 40px;display:grid;gap:14px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-  .card .k{font-size:12.5px;color:var(--mut);letter-spacing:.02em}
-  .card .v{font-family:"IBM Plex Mono",monospace;font-size:28px;font-weight:500;font-variant-numeric:tabular-nums;margin-top:2px}
-  .card .u{font-size:13px;color:var(--mut);margin-left:3px}
-  .card .s{font-size:12px;color:var(--mut);margin-top:4px}
-  .card.pv .v{color:var(--pv)} .card.bat .v{color:var(--bat)} .card.load .v{color:var(--load)}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-  .panel h2{font-size:14px;font-weight:600;margin:0 0 8px;display:flex;justify-content:space-between;align-items:baseline}
-  .panel h2 span{font-weight:400;color:var(--mut);font-size:12.5px}
-  .chart{position:relative;height:300px}
-  .chart.short{height:220px}
-  .alert{border-left:4px solid var(--warn);background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:10px;padding:10px 14px;font-size:13.5px;display:none}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;
+    font-size:14px;line-height:1.5;word-break:keep-all}
+  .num{font-variant-numeric:tabular-nums}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:22px 0 14px}
+  header h1{margin:0;font-size:17px;font-weight:650;letter-spacing:-.01em}
+  header .meta{display:flex;align-items:center;gap:14px;color:var(--mut);font-size:12.5px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--mut);margin-right:6px;vertical-align:1px}
+  .dot.ok{background:var(--ink)} .dot.bad{background:var(--warn)}
+  .link{font:inherit;color:var(--mut);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+  .link:hover{color:var(--ink)}
+
+  .alert{display:none;margin:0 0 14px;padding:10px 14px;border-radius:8px;background:var(--panel);border:1px solid var(--warn);color:var(--warn);font-size:13px}
   .alert.show{display:block}
-  details summary{cursor:pointer;color:var(--mut);font-size:13px}
-  table{border-collapse:collapse;width:100%;font-size:12.5px;font-family:"IBM Plex Mono",monospace}
-  td,th{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-  th{color:var(--mut);font-weight:500}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media (max-width:800px){.grid2{grid-template-columns:1fr}.card .v{font-size:24px}}
-  footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;color:var(--mut);font-size:12px}
-  .btn{font:inherit;font-size:12.5px;padding:3px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
-  .btn:hover{border-color:var(--mut)}
-  .btn:focus-visible,.lock input:focus-visible{outline:2px solid var(--load);outline-offset:2px}
-  .lock{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;z-index:10}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr)}
+  .stat{padding:18px 20px 16px;border-left:1px solid var(--line)}
+  .stat:first-child{border-left:0}
+  .stat .k{font-size:12.5px;color:var(--mut);display:flex;align-items:center;gap:6px}
+  .stat .k i{display:inline-block;width:8px;height:8px;border-radius:2px}
+  .stat .v{font-size:34px;font-weight:600;letter-spacing:-.02em;line-height:1.15;margin-top:6px}
+  .stat .v small{font-size:14px;font-weight:500;color:var(--mut);margin-left:3px;letter-spacing:0}
+  .stat .s{font-size:12px;color:var(--mut);margin-top:4px}
+
+  section{margin-top:14px}
+  .phead{display:flex;justify-content:space-between;align-items:baseline;padding:14px 20px 0}
+  .phead h2{margin:0;font-size:13.5px;font-weight:600}
+  .legend{display:flex;gap:14px;color:var(--mut);font-size:12px}
+  .legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px}
+  .chart{position:relative;height:280px;padding:8px 12px 12px}
+  .chart.s{height:200px}
+
+  details{padding:0}
+  details summary{list-style:none;cursor:pointer;padding:14px 20px;font-size:13.5px;font-weight:600;display:flex;justify-content:space-between}
+  details summary::-webkit-details-marker{display:none}
+  details summary::after{content:"펼치기";font-weight:400;color:var(--mut);font-size:12px}
+  details[open] summary::after{content:"접기"}
+  .kv{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid var(--line)}
+  .kv div{display:flex;justify-content:space-between;gap:12px;padding:9px 20px;border-bottom:1px solid var(--soft);font-size:13px}
+  .kv div span:first-child{color:var(--mut)}
+  .raw{padding:12px 20px 16px;border-top:1px solid var(--line)}
+  .raw table{border-collapse:collapse;width:100%;font-size:12px}
+  .raw td{padding:4px 8px 4px 0;border-bottom:1px solid var(--soft);color:var(--sub)}
+  .raw td:last-child{text-align:right;padding-right:0}
+  .rawwrap{overflow-x:auto}
+
+  footer{color:var(--mut);font-size:12px;padding:18px 0 32px}
+
+  .lock{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;z-index:10}
   .lock[hidden]{display:none}
-  .lock form{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;display:grid;gap:12px}
-  .lock h2{margin:0;font-size:17px;font-weight:600}
-  .lock p{margin:0;color:var(--mut);font-size:13px;word-break:keep-all}
-  .lock input[type=password]{font:inherit;font-size:15px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);width:100%}
-  .lock label.rem{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--mut)}
-  .lock button[type=submit]{font:inherit;font-weight:600;padding:9px 12px;border-radius:9px;border:0;background:var(--bat);color:#fff;cursor:pointer}
-  .lock button[disabled]{opacity:.6;cursor:progress}
+  .lock form{width:100%;max-width:340px;display:grid;gap:12px}
+  .lock h2{margin:0 0 2px;font-size:18px;font-weight:650}
+  .lock p{margin:0 0 6px;color:var(--mut);font-size:13px}
+  .lock input[type=password]{font:inherit;font-size:15px;padding:11px 13px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);width:100%}
+  .lock label{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--mut)}
+  .lock button{font:inherit;font-weight:600;padding:11px;border-radius:8px;border:0;background:var(--ink);color:var(--bg);cursor:pointer}
+  .lock button[disabled]{opacity:.55;cursor:progress}
   .lock .err{color:var(--warn);font-size:13px;min-height:1.2em}
-  a{color:inherit}
+  :focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+  @media (max-width:760px){
+    .wrap{padding:0 16px}
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .stat:nth-child(3){border-left:0}
+    .stat:nth-child(n+3){border-top:1px solid var(--line)}
+    .stat .v{font-size:28px}
+    .kv{grid-template-columns:1fr}
+    header{flex-wrap:wrap}
+    .chart{height:240px}
+  }
 </style>
 </head>
 <body>
 <div class="lock" id="lock">
   <form id="lockForm" autocomplete="off">
     <h2>5kW 목업 모니터링</h2>
-    <p>데이터가 암호화되어 있습니다. 비밀번호를 입력하세요.</p>
+    <p>비밀번호를 입력하세요.</p>
     <input type="password" id="pw" placeholder="비밀번호" autocomplete="current-password" required>
-    <label class="rem"><input type="checkbox" id="remember" checked> 이 브라우저에서 기억</label>
+    <label><input type="checkbox" id="remember" checked> 이 브라우저에서 기억</label>
     <button type="submit" id="unlockBtn">열기</button>
     <div class="err" id="lockErr" role="alert"></div>
   </form>
 </div>
-<header>
-  <h1>5kW 목업 모니터링</h1>
-  <span class="sub" id="station">발전소 —</span>
-  <span class="pill"><span class="dot" id="dot"></span><span id="online">연결 확인 중</span></span>
-  <span class="pill">데이터 시각 <span id="dataTime" style="margin-left:4px">—</span></span>
-  <span class="pill">수집 <span id="updatedAt" style="margin-left:4px">—</span></span>
-  <button class="btn" id="lockBtn" type="button" title="이 브라우저에 저장된 비밀번호를 지우고 화면을 잠급니다">잠그기</button>
-</header>
 
-<main>
-  <div class="alert" id="alert"></div>
+<div class="wrap">
+  <header>
+    <h1>5kW 목업 <span id="station" style="color:var(--mut);font-weight:400"></span></h1>
+    <div class="meta">
+      <span><span class="dot" id="dot"></span><span id="online">연결 확인 중</span></span>
+      <span class="num" id="dataTime"></span>
+      <button class="link" id="lockBtn" type="button">잠그기</button>
+    </div>
+  </header>
 
-  <section class="cards">
-    <div class="card pv"><div class="k">PV 발전</div><div><span class="v" id="pvPower">—</span><span class="u">W</span></div><div class="s" id="pvDetail">PV1 — · PV2 —</div></div>
-    <div class="card bat"><div class="k">배터리 SOC</div><div><span class="v" id="soc">—</span><span class="u">%</span></div><div class="s" id="batDetail">— V · — W</div></div>
-    <div class="card load"><div class="k">부하</div><div><span class="v" id="loadPower">—</span><span class="u">W</span></div><div class="s" id="loadDetail">— V · — Hz</div></div>
-    <div class="card pv"><div class="k">오늘 발전량</div><div><span class="v" id="pvToday">—</span><span class="u">kWh</span></div><div class="s" id="pvTotal">누적 — kWh</div></div>
-    <div class="card load"><div class="k">오늘 소비량</div><div><span class="v" id="loadToday">—</span><span class="u">kWh</span></div><div class="s" id="chgToday">충전 — · 방전 — kWh</div></div>
-    <div class="card bat"><div class="k">배터리 온도</div><div><span class="v" id="batTemp">—</span><span class="u">°C</span></div><div class="s" id="invTemp">인버터 DC — · AC — °C</div></div>
-  </section>
+  <div class="alert" id="alert" role="status"></div>
 
-  <section class="panel">
-    <h2>오늘 (5분 간격) <span id="todayLabel"></span></h2>
-    <div class="chart"><canvas id="chartToday"></canvas></div>
-  </section>
-
-  <div class="grid2">
-    <section class="panel">
-      <h2>최근 30일 발전·소비 <span>kWh/일</span></h2>
-      <div class="chart short"><canvas id="chartDaily"></canvas></div>
-    </section>
-    <section class="panel">
-      <h2>배터리 전압·온도 (오늘)</h2>
-      <div class="chart short"><canvas id="chartBat"></canvas></div>
-    </section>
+  <div class="panel stats">
+    <div class="stat"><div class="k"><i style="background:var(--pv)"></i>PV 발전</div><div class="v num"><span id="pvPower">—</span><small>W</small></div><div class="s num" id="pvSub">—</div></div>
+    <div class="stat"><div class="k"><i style="background:var(--load)"></i>부하</div><div class="v num"><span id="loadPower">—</span><small>W</small></div><div class="s num" id="loadSub">—</div></div>
+    <div class="stat"><div class="k"><i style="background:var(--ink)"></i>배터리</div><div class="v num"><span id="soc">—</span><small>%</small></div><div class="s num" id="batSub">—</div></div>
+    <div class="stat"><div class="k">오늘 발전</div><div class="v num"><span id="pvToday">—</span><small>kWh</small></div><div class="s num" id="todaySub">—</div></div>
   </div>
 
   <section class="panel">
-    <details>
-      <summary>인버터가 보낸 모든 측정값 보기 (raw)</summary>
-      <div style="overflow-x:auto;margin-top:8px"><table id="rawTable"><thead><tr><th>key</th><th>value</th><th>unit</th></tr></thead><tbody></tbody></table></div>
+    <div class="phead">
+      <h2>오늘</h2>
+      <div class="legend"><span><i style="background:var(--pv)"></i>PV</span><span><i style="background:var(--load)"></i>부하</span><span><i style="background:var(--mut)"></i>배터리 %</span></div>
+    </div>
+    <div class="chart"><canvas id="chartToday" aria-label="오늘 PV·부하 전력과 배터리 잔량"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <div class="phead">
+      <h2>최근 30일</h2>
+      <div class="legend"><span><i style="background:var(--pv)"></i>발전 kWh</span><span><i style="background:var(--load)"></i>소비 kWh</span></div>
+    </div>
+    <div class="chart s"><canvas id="chartDaily" aria-label="최근 30일 일간 발전량과 소비량"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <details id="detail">
+      <summary>상세 값</summary>
+      <div class="kv num" id="kv"></div>
+      <div class="raw">
+        <div style="color:var(--mut);font-size:12px;margin-bottom:6px">인버터 원본 항목</div>
+        <div class="rawwrap"><table class="num"><tbody id="rawBody"></tbody></table></div>
+      </div>
     </details>
   </section>
-</main>
-<footer>Deye Cloud OpenAPI → GitHub Actions(5분) → GitHub Pages. 인버터 측정값은 운영 참고용이며 계량 근거가 아닙니다. 화면은 60초마다 자동 갱신됩니다.</footer>
+
+  <footer>Deye Cloud → GitHub Actions(5분) → GitHub Pages · 인버터 측정값은 운영 참고용이며 계량 근거가 아닙니다 · <span class="num" id="updatedAt"></span></footer>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
@@ -127,8 +167,8 @@
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const bust = () => '?_=' + Math.floor(Date.now()/30000);
   const kstDay = (offset=0) => { const d=new Date(Date.now()+9*3600e3+offset*86400e3); return d.toISOString().slice(0,10); };
-
-  let chartToday, chartDaily, chartBat;
+  const hhmm = iso => iso ? iso.replace('T',' ').slice(5,16) : '—';
+  let chartToday, chartDaily;
 
   // ── 암호화 (collector.py 와 같은 형식: AES-256-GCM, PBKDF2-SHA256, AAD = 파일 경로) ──
   const ENC_TAG = 'aesgcm-pbkdf2-v1', CHECK_TEXT = 'deye-monitor-ok';
@@ -183,95 +223,96 @@
     store.del(storeKey()); return false;
   }
 
+  // ── 화면 ──
   function setStatus(L){
     const st = L.status || {};
-    const ok = st.ok && st.logger_online;
-    $('dot').className = 'dot ' + (st.ok ? (st.logger_online ? 'ok' : 'bad') : 'bad');
-    $('online').textContent = !st.ok ? '수집 실패' : (st.logger_online ? '로거 온라인' : `로거 데이터 ${fmt(st.data_age_min)}분 전`);
-    $('dataTime').textContent = st.data_time ? st.data_time.replace('T',' ').slice(5,16) : '—';
-    $('updatedAt').textContent = L.updated_at ? L.updated_at.replace('T',' ').slice(5,16) : '—';
-    $('station').textContent = (L.station && L.station.name ? L.station.name : '발전소') + (L.device && L.device.sn ? ' · ' + L.device.sn : '');
+    $('dot').className = 'dot ' + (st.ok && st.logger_online ? 'ok' : 'bad');
+    $('online').textContent = !st.ok ? '수집 실패' : (st.logger_online ? '온라인' : `${fmt(st.data_age_min)}분째 갱신 없음`);
+    $('dataTime').textContent = st.data_time ? '데이터 ' + hhmm(st.data_time) : '';
+    $('updatedAt').textContent = '수집 ' + hhmm(L.updated_at);
+    $('station').textContent = L.station && L.station.name ? '· ' + L.station.name : '';
     const a = $('alert');
-    if(!st.ok){ a.textContent = `수집 실패 ${st.consecutive_failures||1}회 연속 — ${st.error||''}  (마지막 성공 데이터를 표시 중)`; a.classList.add('show'); }
-    else if(!st.logger_online){ a.textContent = `로거 데이터가 ${fmt(st.data_age_min)}분 동안 갱신되지 않았습니다. 인버터 Wi-Fi 또는 공유기를 확인하세요.`; a.classList.add('show'); }
+    if(!st.ok){ a.textContent = `수집 실패 ${st.consecutive_failures||1}회 연속 — ${st.error||''} (마지막 성공 값을 표시 중)`; a.classList.add('show'); }
+    else if(!st.logger_online){ a.textContent = `로거 데이터가 ${fmt(st.data_age_min)}분 동안 갱신되지 않았습니다. 인버터 Wi-Fi나 공유기를 확인하세요.`; a.classList.add('show'); }
     else a.classList.remove('show');
   }
 
-  function setCards(L){
+  function setValues(L){
     const d = L.data || {};
-    $('pvPower').textContent = fmt(d.pv_power_w);
-    $('pvDetail').textContent = `PV1 ${fmt(d.pv1_power_w)} W · PV2 ${fmt(d.pv2_power_w)} W  (${fmt(d.pv1_voltage_v)} / ${fmt(d.pv2_voltage_v)} V)`;
-    $('soc').textContent = fmt(d.battery_soc_pct);
     const bp = d.battery_power_w;
-    $('batDetail').textContent = `${fmt(d.battery_voltage_v,1)} V · ${fmt(Math.abs(bp||0))} W ${bp>0?'방전':bp<0?'충전':''}`;
+    $('pvPower').textContent = fmt(d.pv_power_w);
+    $('pvSub').textContent = `PV1 ${fmt(d.pv1_power_w)} · PV2 ${fmt(d.pv2_power_w)}`;
     $('loadPower').textContent = fmt(d.load_power_w);
-    $('loadDetail').textContent = `${fmt(d.load_voltage_v,1)} V · ${fmt(d.ac_frequency_hz,2)} Hz`;
+    $('loadSub').textContent = `${fmt(d.load_voltage_v,1)} V · ${fmt(d.ac_frequency_hz,1)} Hz`;
+    $('soc').textContent = fmt(d.battery_soc_pct);
+    $('batSub').textContent = bp ? `${bp<0?'충전':'방전'} ${fmt(Math.abs(bp))} W · ${fmt(d.battery_voltage_v,1)} V` : `대기 · ${fmt(d.battery_voltage_v,1)} V`;
     $('pvToday').textContent = fmt(d.pv_today_kwh,1);
-    $('pvTotal').textContent = `누적 ${fmt(d.pv_total_kwh,1)} kWh`;
-    $('loadToday').textContent = fmt(d.load_today_kwh,1);
-    $('chgToday').textContent = `충전 ${fmt(d.charge_today_kwh,1)} · 방전 ${fmt(d.discharge_today_kwh,1)} kWh`;
-    $('batTemp').textContent = fmt(d.battery_temp_c,1);
-    $('invTemp').textContent = `인버터 DC ${fmt(d.inverter_temp_dc_c,1)} · AC ${fmt(d.inverter_temp_ac_c,1)} °C`;
-    const tb = $('rawTable').querySelector('tbody'); tb.innerHTML='';
+    $('todaySub').textContent = `소비 ${fmt(d.load_today_kwh,1)} kWh`;
+
+    const rows = [
+      ['PV1', `${fmt(d.pv1_voltage_v,1)} V · ${fmt(d.pv1_current_a,1)} A · ${fmt(d.pv1_power_w)} W`],
+      ['PV2', `${fmt(d.pv2_voltage_v,1)} V · ${fmt(d.pv2_current_a,1)} A · ${fmt(d.pv2_power_w)} W`],
+      ['누적 발전', `${fmt(d.pv_total_kwh,1)} kWh`],
+      ['배터리', `${fmt(d.battery_voltage_v,2)} V · ${fmt(d.battery_current_a,1)} A · ${fmt(bp)} W`],
+      ['배터리 온도', `${fmt(d.battery_temp_c,1)} °C`],
+      ['오늘 충전 / 방전', `${fmt(d.charge_today_kwh,1)} / ${fmt(d.discharge_today_kwh,1)} kWh`],
+      ['출력', `${fmt(d.load_voltage_v,1)} V · ${fmt(d.ac_frequency_hz,2)} Hz`],
+      ['인버터 온도', `AC ${fmt(d.inverter_temp_ac_c,1)} °C`],
+      ['누적 소비', `${fmt(d.load_total_kwh,1)} kWh`],
+    ];
+    $('kv').innerHTML = rows.map(([k,v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('');
     const raw = L.raw || {}, units = L.units || {};
-    Object.keys(raw).sort().forEach(k => { const tr=document.createElement('tr'); tr.innerHTML=`<td>${k}</td><td>${raw[k]}</td><td>${units[k]||''}</td>`; tb.appendChild(tr); });
+    $('rawBody').innerHTML = Object.keys(raw).sort().map(k => `<tr><td>${k}</td><td>${raw[k]} ${units[k]||''}</td></tr>`).join('');
   }
 
   function baseOpts(){
-    const ink = css('--ink'), mut = css('--mut'), line = css('--line');
-    Chart.defaults.color = mut; Chart.defaults.borderColor = line; Chart.defaults.font.family = '"IBM Plex Sans KR", system-ui, sans-serif';
+    Chart.defaults.color = css('--mut'); Chart.defaults.borderColor = css('--line');
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily; Chart.defaults.font.size = 11;
     return { responsive:true, maintainAspectRatio:false, animation:false, interaction:{mode:'index',intersect:false},
-      plugins:{legend:{labels:{boxWidth:10,boxHeight:10,usePointStyle:true}}, tooltip:{callbacks:{}}},
-      elements:{point:{radius:0}, line:{borderWidth:1.8, tension:0.25}} };
+      plugins:{legend:{display:false}, tooltip:{backgroundColor:css('--ink'), titleColor:css('--bg'), bodyColor:css('--bg'), padding:8, boxPadding:4, usePointStyle:true}},
+      elements:{point:{radius:0, hoverRadius:3}, line:{borderWidth:1.6, tension:0.3}} };
   }
 
   function drawToday(rows){
-    const labels = rows.map(r=>r.t);
-    const ds = [
-      {label:'PV W', data:rows.map(r=>r.pv_power_w), borderColor:css('--pv'), backgroundColor:css('--pv')+'22', fill:true, yAxisID:'y'},
-      {label:'부하 W', data:rows.map(r=>r.load_power_w), borderColor:css('--load'), yAxisID:'y'},
-      {label:'배터리 W (+방전)', data:rows.map(r=>r.battery_power_w), borderColor:css('--mut'), borderDash:[4,3], yAxisID:'y'},
-      {label:'SOC %', data:rows.map(r=>r.battery_soc_pct), borderColor:css('--bat'), yAxisID:'y2', borderWidth:2.2},
-    ];
     const o = baseOpts();
-    o.scales = { x:{ticks:{maxTicksLimit:12}}, y:{title:{display:true,text:'W'},beginAtZero:true}, y2:{position:'right',min:0,max:100,title:{display:true,text:'SOC %'},grid:{drawOnChartArea:false}} };
+    o.scales = {
+      x:{grid:{display:false}, border:{display:false}, ticks:{maxTicksLimit:innerWidth<760?4:8, maxRotation:0, autoSkip:true}},
+      y:{beginAtZero:true, border:{display:false}, ticks:{maxTicksLimit:5, callback:v=>fmt(v)+' W'}},
+      y2:{position:'right', min:0, max:100, border:{display:false}, grid:{display:false}, ticks:{stepSize:50, callback:v=>v+'%'}},
+    };
+    const pv = css('--pv');
     if(chartToday) chartToday.destroy();
-    chartToday = new Chart($('chartToday'), {type:'line', data:{labels, datasets:ds}, options:o});
-    $('todayLabel').textContent = kstDay() + ' · ' + rows.length + '점';
-  }
-
-  function drawBat(rows){
-    const labels = rows.map(r=>r.t);
-    const o = baseOpts();
-    o.scales = { x:{ticks:{maxTicksLimit:8}}, y:{title:{display:true,text:'V'}}, y2:{position:'right',title:{display:true,text:'°C'},grid:{drawOnChartArea:false}} };
-    if(chartBat) chartBat.destroy();
-    chartBat = new Chart($('chartBat'), {type:'line', data:{labels, datasets:[
-      {label:'배터리 전압 V', data:rows.map(r=>r.battery_voltage_v), borderColor:css('--bat'), yAxisID:'y'},
-      {label:'배터리 온도 °C', data:rows.map(r=>r.battery_temp_c), borderColor:css('--warn'), yAxisID:'y2'},
+    chartToday = new Chart($('chartToday'), {type:'line', data:{labels:rows.map(r=>r.t), datasets:[
+      {label:'PV', data:rows.map(r=>r.pv_power_w), borderColor:pv, backgroundColor:pv+'26', fill:true, yAxisID:'y'},
+      {label:'부하', data:rows.map(r=>r.load_power_w), borderColor:css('--load'), yAxisID:'y'},
+      {label:'배터리 %', data:rows.map(r=>r.battery_soc_pct), borderColor:css('--mut'), borderWidth:1.2, borderDash:[3,3], yAxisID:'y2'},
     ]}, options:o});
   }
 
   function drawDaily(daily){
     const days = Object.keys(daily).sort().slice(-30);
     const o = baseOpts();
-    o.scales = { x:{ticks:{maxTicksLimit:10, callback:(v,i)=>days[i].slice(5)}}, y:{beginAtZero:true,title:{display:true,text:'kWh'}} };
+    o.scales = {
+      x:{grid:{display:false}, border:{display:false}, ticks:{maxTicksLimit:innerWidth<760?5:10, maxRotation:0, callback:(v,i)=>days[i].slice(5).replace('-','/')}},
+      y:{beginAtZero:true, border:{display:false}, ticks:{maxTicksLimit:4}},
+    };
     if(chartDaily) chartDaily.destroy();
     chartDaily = new Chart($('chartDaily'), {type:'bar', data:{labels:days, datasets:[
-      {label:'발전', data:days.map(d=>daily[d].pv_today_kwh??null), backgroundColor:css('--pv')},
-      {label:'소비', data:days.map(d=>daily[d].load_today_kwh??null), backgroundColor:css('--load')},
+      {label:'발전', data:days.map(d=>daily[d].pv_today_kwh??null), backgroundColor:css('--pv'), borderRadius:2, maxBarThickness:14},
+      {label:'소비', data:days.map(d=>daily[d].load_today_kwh??null), backgroundColor:css('--load'), borderRadius:2, maxBarThickness:14},
     ]}, options:o});
   }
 
   async function refreshLatest(){
-    try{ const L = await getJSON('data/latest.json'); setStatus(L); setCards(L); }
-    catch(e){ $('online').textContent='latest.json 없음'; $('dot').className='dot bad'; console.warn(e); }
+    try{ const L = await getJSON('data/latest.json'); setStatus(L); setValues(L); }
+    catch(e){ $('online').textContent='데이터 없음'; $('dot').className='dot bad'; console.warn(e); }
   }
   async function refreshHistory(){
     try{
       let rows = [];
       try{ rows = await getJSON('data/history/'+kstDay()+'.json'); }
       catch(e){ rows = await getJSON('data/history/'+kstDay(-1)+'.json').catch(()=>[]); }
-      drawToday(rows); drawBat(rows);
+      drawToday(rows);
     }catch(e){ console.warn(e); }
     try{ drawDaily(await getJSON('data/daily.json')); }catch(e){ console.warn(e); }
   }
@@ -283,7 +324,7 @@
     if(started) return; started = true;
     setInterval(() => { if(KEY || !META) refreshLatest(); }, 60*1000);
     setInterval(() => { if(KEY || !META) refreshHistory(); }, 5*60*1000);
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refreshHistory);
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if(KEY || !META) refreshHistory(); });
   }
 
   $('lockForm').addEventListener('submit', async ev => {
@@ -306,7 +347,7 @@
 
   (async function init(){
     try{ META = await rawFetch('data/key.json'); }catch(e){ META = null; }
-    if(!META || !META.check){ $('lockBtn').hidden = true; start(); return; }   // 암호화 안 된 데이터
+    if(!META || !META.check){ $('lockBtn').hidden = true; start(); return; }
     if(!window.crypto || !crypto.subtle){ showLock('이 브라우저는 암호 해제를 지원하지 않습니다 (https 주소로 접속하세요).'); return; }
     if(await tryStoredKey()) start(); else showLock();
   })();

@@ -1,0 +1,11 @@
+{
+ "v": 1,
+ "kdf": "PBKDF2-SHA256",
+ "iter": 600000,
+ "salt": "p8KraGuaBTclNEDlXyml/g==",
+ "check": {
+  "enc": "aesgcm-pbkdf2-v1",
+  "iv": "QfVtySn2AL8rnND5",
+  "ct": "KxuS6zOQlQdh+0RPfANVRcGaNNdx2vS1Xr4SDWl6GQ=="
+ }
+}

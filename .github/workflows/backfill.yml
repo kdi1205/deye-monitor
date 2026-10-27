@@ -1,0 +1,114 @@
+name: 과거 데이터 가져오기
+
+# Actions 탭 → 이 워크플로우 → Run workflow 로 수동 실행한다.
+# Deye Cloud 에 남아 있는 과거 기록(5분 곡선 + 일 합계)을 받아 data/ 에 암호화해 커밋하고 화면을 다시 배포한다.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "시작일 YYYY-MM-DD (비우면 30일 전)"
+        required: false
+        default: ""
+      end:
+        description: "종료일 YYYY-MM-DD (비우면 오늘)"
+        required: false
+        default: ""
+      force:
+        description: "이미 채워진 날도 다시 조회"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deye-collect          # 5분 수집과 같은 그룹 → 동시에 돌지 않아 커밋이 꼬이지 않는다
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 오늘 날짜 (캐시 키)
+        id: d
+        run: echo "day=$(TZ=Asia/Seoul date '+%Y%m%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 토큰·장비 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: deye-cache-${{ steps.d.outputs.day }}
+          restore-keys: |
+            deye-cache-
+
+      - name: 암호화 라이브러리 설치
+        run: python3 -m pip install --quiet --disable-pip-version-check cryptography==46.0.7
+
+      - name: 과거 데이터 조회
+        env:
+          DEYE_APP_ID: ${{ secrets.DEYE_APP_ID }}
+          DEYE_APP_SECRET: ${{ secrets.DEYE_APP_SECRET }}
+          DEYE_EMAIL: ${{ secrets.DEYE_EMAIL }}
+          DEYE_PASSWORD: ${{ secrets.DEYE_PASSWORD }}
+          DEYE_REGION: ${{ vars.DEYE_REGION || 'eu' }}
+          DEYE_STATION_ID: ${{ vars.DEYE_STATION_ID }}
+          DEYE_DEVICE_SN: ${{ vars.DEYE_DEVICE_SN }}
+          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+          DATA_PASSPHRASE_OLD: ${{ secrets.DATA_PASSPHRASE_OLD }}
+          DEYE_REQUIRE_ENCRYPTION: "1"
+          IN_START: ${{ inputs.start }}
+          IN_END: ${{ inputs.end }}
+          IN_FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$IN_FORCE" = "true" ]; then F="--force"; else F=""; fi
+          python3 collector.py --backfill "$IN_START" "$IN_END" $F
+
+      - name: 커밋
+        run: |
+          git config user.name "deye-collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "추가된 데이터 없음"
+          else
+            git commit -q -m "backfill: ${IN_START:-auto} ~ ${IN_END:-today}"
+            for i in 1 2 3; do
+              git pull --rebase -q && git push -q && break
+              sleep 5
+            done
+          fi
+        env:
+          IN_START: ${{ inputs.start }}
+          IN_END: ${{ inputs.end }}
+
+      - name: Pages 아티팩트 준비
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          cp -r data _site/
+          touch _site/.nojekyll
+
+      - name: Pages 아티팩트 업로드
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: backfill
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@v4

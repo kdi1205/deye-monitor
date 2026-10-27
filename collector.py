@@ -26,6 +26,9 @@ Deye Cloud OpenAPI 수집기 — 5kW 목업 모니터링
   python collector.py            수집 1회
   python collector.py --check    토큰 발급 + 발전소/장비 목록만 출력 (처음 설정 확인용)
   python collector.py --points   인버터의 measurePoints 목록 출력 (필드 이름 확인용)
+  python collector.py --backfill [시작일] [종료일] [--force]
+                                 Deye Cloud 의 과거 기록을 받아 history/·daily.json 에 채운다
+                                 (날짜 YYYY-MM-DD, 생략하면 30일 전 ~ 오늘)
 
 암호화를 쓰면 cryptography 패키지가 필요하다 (pip install cryptography). 그 외는 표준 라이브러리.
 """
@@ -59,8 +62,9 @@ REGIONS = {
 SUCCESS = {0, 1000000, 1106000, "0", "1000000", "1106000"}
 ENVELOPE = {"code", "msg", "success", "requestId"}
 TIMEOUT = 30
-HISTORY_KEEP_DAYS = 400     # history 파일 보관 일수
-DAILY_KEEP_DAYS = 90        # daily.json 보관 일수
+HISTORY_KEEP_DAYS = int(os.environ.get("DEYE_HISTORY_KEEP_DAYS") or 3650)   # history 파일 보관 일수
+DAILY_KEEP_DAYS = int(os.environ.get("DEYE_DAILY_KEEP_DAYS") or 3650)       # daily.json 보관 일수
+API_GAP_S = 1.0             # 과거 데이터 조회 시 호출 간격 (호출 제한 대비)
 
 # /device/latest 의 dataList key → latest.json 의 정규화 이름. 앞의 것부터 찾는다.
 FIELD_MAP: dict[str, list[str]] = {
@@ -108,13 +112,20 @@ class ApiError(Exception):
 
 
 # ───────────────────────── 암호화 ─────────────────────────
-# 파일 형식: {"enc": "aesgcm-pbkdf2-v1", "iv": b64(12바이트), "ct": b64(암호문+태그)}
-# AAD(추가 인증 데이터) = 저장소 기준 상대 경로 (예: "data/latest.json") → 파일을 바꿔치기하면 복호화 실패
+# 파일 형식 3가지 (AES-256-GCM, 키: PBKDF2-SHA256)
+#   통째: {"enc":"aesgcm-pbkdf2-v1", "iv", "ct"}                AAD = 경로            (latest.json, .cache/*)
+#   행별: {"enc":"aesgcm-rows-v1", "rows":[{"iv","ct"}, ...]}    AAD = 경로 + "#row"   (history/*.json)
+#   날짜별: {"enc":"aesgcm-map-v1", "items":{"YYYY-MM-DD":{"iv","ct"}}}  AAD = 경로 + "#날짜"  (daily.json)
+# 행별·날짜별로 나누는 이유: 통째로 암호화하면 5분마다 파일 전체가 새 난수로 바뀌어 git 이 차분 저장을 못 한다
+#   (시험: 하루 288커밋에 15.6MB → 행별 1.5MB). 내용이 같은 행은 같은 암호문을 다시 써서 바뀐 행만 커밋된다.
+#   같은 평문·같은 AAD 에만 같은 iv 를 재사용하므로 새로 드러나는 정보는 없다 (그 행이 안 바뀌었다는 것뿐).
 # 키 정보: data/key.json = {"v":1, "kdf":"PBKDF2-SHA256", "iter":600000, "salt":b64, "check":<봉투>}
 #   salt 와 iter 는 공개되어도 된다. check 는 브라우저가 비밀번호를 빠르게 검증하는 용도.
 KEY_FILE = DATA / "key.json"
 KDF_ITER = 600_000
 ENC_TAG = "aesgcm-pbkdf2-v1"
+ROWS_TAG = "aesgcm-rows-v1"
+MAP_TAG = "aesgcm-map-v1"
 CHECK_TEXT = "deye-monitor-ok"
 CRYPTO = None   # 암호화 사용 시 Crypto 인스턴스
 
@@ -128,7 +139,11 @@ def _b64d(s: str) -> bytes:
 
 
 def _is_env(obj) -> bool:
-    return isinstance(obj, dict) and obj.get("enc") == ENC_TAG
+    return isinstance(obj, dict) and obj.get("enc") in (ENC_TAG, ROWS_TAG, MAP_TAG)
+
+
+def _dump(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
 def _aad(path: Path) -> str:
@@ -136,6 +151,15 @@ def _aad(path: Path) -> str:
         return path.resolve().relative_to(ROOT).as_posix()
     except ValueError:
         return path.name
+
+
+def _kind(path: Path) -> str:
+    rel = _aad(path)
+    if rel.startswith("data/history/"):
+        return "rows"
+    if rel == "data/daily.json":
+        return "map"
+    return "whole"
 
 
 class Crypto:
@@ -157,18 +181,23 @@ class Crypto:
         self.iter = int(meta.get("iter", KDF_ITER))
         self.key = self._derive(passphrase)
         self.old_key = self._derive(old_passphrase) if old_passphrase else None
-        self.rotated = False
+        self._reuse: dict[tuple[str, str], dict] = {}   # (aad, 평문) → 기존 암호문 (바뀌지 않은 행 재사용)
+        self.used_old = False
+        changed = "check" not in meta
         if "check" in meta:
             if self._try(meta["check"], "check", self.key) == CHECK_TEXT:
                 pass
             elif self.old_key and self._try(meta["check"], "check", self.old_key) == CHECK_TEXT:
-                self.rotated = True
+                changed = True       # 비밀번호 교체
             else:
                 raise ApiError("DATA_PASSPHRASE 가 기존 데이터와 맞지 않습니다. 비밀번호를 바꾼 경우 "
                                "DATA_PASSPHRASE_OLD 에 이전 비밀번호를 넣고 한 번 실행하세요.")
-        meta["check"] = self._enc_raw(CHECK_TEXT.encode(), "check", self.key)
-        DATA.mkdir(parents=True, exist_ok=True)
-        KEY_FILE.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        if changed:
+            iv = secrets.token_bytes(12)
+            ct = self._AESGCM(self.key).encrypt(iv, CHECK_TEXT.encode(), b"check")
+            meta["check"] = {"enc": ENC_TAG, "iv": _b64e(iv), "ct": _b64e(ct)}
+            DATA.mkdir(parents=True, exist_ok=True)
+            KEY_FILE.write_text(json.dumps(meta, indent=1), encoding="utf-8")
         self._migrate()
 
     def _derive(self, pw: str) -> bytes:
@@ -176,44 +205,83 @@ class Crypto:
         kdf = self._PBKDF2(algorithm=self._hashes.SHA256(), length=32, salt=self.salt, iterations=self.iter)
         return kdf.derive(pw.encode("utf-8"))
 
-    def _enc_raw(self, data: bytes, aad: str, key: bytes) -> dict:
-        iv = secrets.token_bytes(12)
-        ct = self._AESGCM(key).encrypt(iv, data, aad.encode("utf-8"))
-        return {"enc": ENC_TAG, "iv": _b64e(iv), "ct": _b64e(ct)}
-
     def _try(self, env: dict, aad: str, key: bytes):
         try:
             return self._AESGCM(key).decrypt(_b64d(env["iv"]), _b64d(env["ct"]), aad.encode("utf-8")).decode("utf-8")
         except Exception:  # noqa: BLE001
             return None
 
-    def encrypt(self, obj, aad: str) -> dict:
-        return self._enc_raw(json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), aad, self.key)
-
-    def decrypt(self, env: dict, aad: str):
+    def _open(self, env: dict, aad: str) -> str:
         txt = self._try(env, aad, self.key)
-        if txt is None and self.old_key:
+        if txt is not None:
+            self._reuse[(aad, txt)] = {"iv": env["iv"], "ct": env["ct"]}
+            return txt
+        if self.old_key:
             txt = self._try(env, aad, self.old_key)
-        if txt is None:
-            raise ApiError(f"복호화 실패: {aad} (비밀번호가 다르거나 파일이 손상됨)")
-        return json.loads(txt)
+            if txt is not None:
+                self.used_old = True
+                return txt
+        raise ApiError(f"복호화 실패: {aad} (비밀번호가 다르거나 파일이 손상됨)")
+
+    def _seal(self, plain: str, aad: str) -> dict:
+        hit = self._reuse.get((aad, plain))
+        if hit:
+            return hit
+        iv = secrets.token_bytes(12)
+        ct = self._AESGCM(self.key).encrypt(iv, plain.encode("utf-8"), aad.encode("utf-8"))
+        env = {"iv": _b64e(iv), "ct": _b64e(ct)}
+        self._reuse[(aad, plain)] = env
+        return env
+
+    def encode(self, obj, path: Path) -> str:
+        """평문 객체 → 파일에 쓸 문자열. 행별·날짜별 형식은 한 줄에 한 항목 (diff 가 읽기 쉽다)."""
+        aad, kind = _aad(path), _kind(path)
+        if kind == "rows" and isinstance(obj, list):
+            body = ",\n".join(json.dumps(self._seal(_dump(r), aad + "#row")) for r in obj)
+            return '{"enc":"%s","rows":[\n%s\n]}\n' % (ROWS_TAG, body)
+        if kind == "map" and isinstance(obj, dict):
+            body = ",\n".join(f"{json.dumps(k)}:{json.dumps(self._seal(_dump(v), f'{aad}#{k}'))}"
+                              for k, v in sorted(obj.items()))
+            return '{"enc":"%s","items":{\n%s\n}}\n' % (MAP_TAG, body)
+        return json.dumps({"enc": ENC_TAG, **self._seal(_dump(obj), aad)})
+
+    def decode(self, fobj: dict, path: Path):
+        aad, tag = _aad(path), fobj.get("enc")
+        if tag == ROWS_TAG:
+            return [json.loads(self._open(e, aad + "#row")) for e in fobj.get("rows") or []]
+        if tag == MAP_TAG:
+            return {k: json.loads(self._open(e, f"{aad}#{k}")) for k, e in (fobj.get("items") or {}).items()}
+        return json.loads(self._open(fobj, aad))
+
+    def _first_env(self, fobj: dict, path: Path):
+        tag = fobj.get("enc")
+        if tag == ROWS_TAG:
+            rows = fobj.get("rows") or []
+            return (rows[0], _aad(path) + "#row") if rows else (None, None)
+        if tag == MAP_TAG:
+            items = fobj.get("items") or {}
+            k = next(iter(items), None)
+            return (items[k], f"{_aad(path)}#{k}") if k else (None, None)
+        return fobj, _aad(path)
 
     def _migrate(self) -> None:
-        """평문으로 남은 파일, 또는 이전 비밀번호로 암호화된 파일을 현재 키로 다시 쓴다."""
+        """평문 파일, 이전 비밀번호로 암호화된 파일, 형식이 맞지 않는 파일(예: 통째 암호화된 history)을
+        현재 키·현재 형식으로 다시 쓴다. 정상 파일은 첫 항목만 확인하고 넘어간다."""
         targets = [p for p in list(DATA.rglob("*.json")) + list(CACHE.glob("*.json")) if p != KEY_FILE]
+        want = {"rows": ROWS_TAG, "map": MAP_TAG, "whole": ENC_TAG}
         for p in targets:
             try:
                 obj = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            aad = _aad(p)
             if _is_env(obj):
-                if self._try(obj, aad, self.key) is not None:
+                env, aad = self._first_env(obj, p)
+                if obj.get("enc") == want[_kind(p)] and (env is None or self._try(env, aad, self.key) is not None):
                     continue
-                plain = self.decrypt(obj, aad)       # old_key 로 풀림 (안 풀리면 예외)
+                plain = self.decode(obj, p)          # 안 풀리면 예외
             else:
                 plain = obj                          # 평문 → 암호화
-            p.write_text(json.dumps(self.encrypt(plain, aad)), encoding="utf-8")
+            p.write_text(self.encode(plain, p), encoding="utf-8")
 
 
 def init_crypto() -> None:
@@ -233,14 +301,14 @@ def read_json(path: Path, default):
     if _is_env(obj):
         if CRYPTO is None:
             raise ApiError(f"{_aad(path)} 는 암호화되어 있습니다. DATA_PASSPHRASE 를 설정하세요.")
-        return CRYPTO.decrypt(obj, _aad(path))
+        return CRYPTO.decode(obj, path)
     return obj
 
 
 def write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if CRYPTO is not None and path != KEY_FILE:
-        text = json.dumps(CRYPTO.encrypt(obj, _aad(path)))
+        text = CRYPTO.encode(obj, path)
     else:
         text = json.dumps(obj, ensure_ascii=False, indent=1)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -377,6 +445,31 @@ class DeyeClient:
         res = self.post("/device/measurePoints", {"deviceSn": sn, "deviceType": device_type})
         data = res.get("data") if isinstance(res.get("data"), dict) else res
         return list(data.get("measurePoints") or [])
+
+    # --- 과거 데이터 ---
+    def post_slow(self, path: str, body: dict) -> dict:
+        """과거 데이터용: 호출 간격을 두고, 호출 제한(429)이면 30초 쉬고 한 번 더."""
+        time.sleep(API_GAP_S)
+        try:
+            return self.post(path, body)
+        except ApiError as e:
+            if "호출 제한" not in str(e):
+                raise
+            time.sleep(30)
+            return self.post(path, body)
+
+    def device_history_daily(self, sn: str, start: str, end: str) -> dict:
+        # granularity=2: 일 합계. measurePoints 를 보내면 2101006 오류, 범위는 31일 이하
+        return self.post_slow("/device/history", {"deviceSn": sn, "startAt": start, "endAt": end, "granularity": 2})
+
+    def device_history_frames(self, sn: str, day: str, points: list[str]) -> dict:
+        # granularity=1: 하루치 프레임(로거 업로드 주기). measurePoints 필수
+        return self.post_slow("/device/history", {"deviceSn": sn, "startAt": day, "endAt": day,
+                                                  "granularity": 1, "measurePoints": points})
+
+    def station_history_daily(self, station_id, start: str, end: str) -> dict:
+        return self.post_slow("/station/history", {"stationId": station_id, "startAt": start, "endAt": end,
+                                                   "granularity": 2})
 
 
 # ───────────────────────── 발전소·장비 선택 ─────────────────────────
@@ -573,6 +666,276 @@ def update_daily(t: datetime, norm: dict) -> None:
     write_json(DATA / "daily.json", daily)
 
 
+# ───────────────────────── 과거 데이터 가져오기 (--backfill) ─────────────────────────
+# Deye Cloud 에 남아 있는 과거 기록을 받아 history/ 와 daily.json 에 채운다.
+#   1) 일 합계: /device/history granularity=2 (31일씩). 안 되면 /station/history granularity=2
+#   2) 5분 곡선: /device/history granularity=1 (하루씩, HISTORY_FIELDS 에 해당하는 key 만 요청)
+# 이미 있는 행과 시각이 겹치면(90초 이내) 건너뛴다. 270행 이상 찬 날은 --force 가 없으면 조회하지 않는다.
+DAILY_KEYS = {   # 일 합계 응답 key → daily.json 항목
+    "pv_today_kwh": ["Production", "generationValue"],
+    "load_today_kwh": ["Consumption", "consumptionValue"],
+    "charge_today_kwh": ["ChargingCapacity", "chargeValue"],
+    "discharge_today_kwh": ["DischargingCapacity", "dischargeValue"],
+}
+FULL_DAY_ROWS = 270
+
+
+def history_points() -> list[str]:
+    pts = []
+    for f in HISTORY_FIELDS:
+        for k in FIELD_MAP.get(f, []):
+            if k not in pts:
+                pts.append(k)
+    return pts
+
+
+def _entries(res: dict) -> list:
+    data = res.get("data")
+    if isinstance(data, list):
+        return data
+    data = data if isinstance(data, dict) else res
+    for k in ("dataList", "stationDataItems", "items", "list", "historyList"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return v
+    return []
+
+
+def _entry_values(e: dict) -> dict:
+    items = e.get("itemList")
+    if not isinstance(items, list):
+        items = e.get("dataList") if isinstance(e.get("dataList"), list) else None
+    if items is not None:
+        return {(i.get("key") or i.get("name")): i.get("value") for i in items
+                if isinstance(i, dict) and (i.get("key") or i.get("name"))}
+    return {k: v for k, v in e.items() if not isinstance(v, (list, dict))}
+
+
+def _entry_time(e: dict):
+    """응답 한 항목의 시각 → KST datetime (날짜만 있으면 그날 00:00). 못 읽으면 None."""
+    if e.get("year") and e.get("month") and e.get("day"):
+        try:
+            return datetime(int(e["year"]), int(e["month"]), int(e["day"]), tzinfo=KST)
+        except (TypeError, ValueError):
+            return None
+    for k in ("time", "collectionTime", "timeStamp", "timestamp", "date"):
+        v = e.get(k)
+        if v in (None, ""):
+            continue
+        try:
+            ts = float(v)
+            if ts > 1e12:
+                ts /= 1000
+            return datetime.fromtimestamp(ts, KST)
+        except (TypeError, ValueError):
+            pass
+        s = str(v).strip().replace("/", "-")
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s[:19], fmt).replace(tzinfo=KST)   # 시간대 표기가 없으면 발전소 시간(KST)으로 본다
+            except ValueError:
+                continue
+    return None
+
+
+def _shape(res: dict) -> str:
+    """파싱이 안 될 때 로그에 남길 응답 구조 (값은 빼고 key 이름만)."""
+    data = res.get("data") if isinstance(res.get("data"), (dict, list)) else res
+    top = sorted(k for k in res if k not in ENVELOPE)
+    inner = sorted(data) if isinstance(data, dict) else f"list[{len(data)}]"
+    ents = _entries(res)
+    first = sorted(ents[0]) if ents and isinstance(ents[0], dict) else None
+    keys = sorted(_entry_values(ents[0]))[:20] if ents and isinstance(ents[0], dict) else None
+    return f"top={top} data={inner} 항목수={len(ents)} 첫항목key={first} 값key={keys}"
+
+
+def _daily_from(res: dict) -> dict[str, dict]:
+    out = {}
+    for e in _entries(res):
+        if not isinstance(e, dict):
+            continue
+        t = _entry_time(e)
+        if t is None:
+            continue
+        vals = _entry_values(e)
+        rec = {}
+        for name, keys in DAILY_KEYS.items():
+            for k in keys:
+                if k in vals and to_num(vals[k]) is not None:
+                    rec[name] = to_num(vals[k])
+                    break
+        if rec:
+            out[t.strftime("%Y-%m-%d")] = rec
+    return out
+
+
+def _frames_from(res: dict, day: str) -> list[dict]:
+    rows = []
+    for e in _entries(res):
+        if not isinstance(e, dict):
+            continue
+        t = _entry_time(e)
+        if t is None or t.strftime("%Y-%m-%d") != day:
+            continue
+        norm = normalize(_entry_values(e))
+        row = {"t": t.strftime("%H:%M"), "dt": t.isoformat(timespec="seconds")}
+        row.update({k: norm.get(k) for k in HISTORY_FIELDS})
+        row["src"] = "api"
+        if any(row[k] is not None for k in HISTORY_FIELDS):
+            rows.append(row)
+    return rows
+
+
+def _epoch(row: dict):
+    try:
+        return datetime.fromisoformat(row["dt"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def merge_rows(old: list[dict], new: list[dict]) -> tuple[list[dict], int]:
+    have = [x for x in (_epoch(r) for r in old) if x is not None]
+    added = []
+    for r in new:
+        e = _epoch(r)
+        if e is None or any(abs(e - h) < 90 for h in have):
+            continue
+        have.append(e)
+        added.append(r)
+    if not added:
+        return old, 0
+    rows = old + added
+    rows.sort(key=lambda r: r.get("dt") or "")
+    return rows, len(added)
+
+
+def _parse_day(s: str, default: datetime) -> datetime:
+    s = (s or "").strip()
+    if not s:
+        return default
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=KST)
+    except ValueError:
+        raise ApiError(f"날짜 형식은 YYYY-MM-DD 입니다: {s!r}")
+
+
+def backfill(start_s: str, end_s: str, force: bool) -> int:
+    try:
+        init_crypto()
+        today = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
+        start = _parse_day(start_s, today - timedelta(days=30))
+        end = min(_parse_day(end_s, today), today)
+        if start > end:
+            raise ApiError(f"시작일 {start:%Y-%m-%d} 이 종료일 {end:%Y-%m-%d} 보다 늦습니다.")
+        client = DeyeClient()
+        inv = resolve_inventory(client)
+    except ApiError as e:
+        print(f"::error::{e}")
+        return 1
+    sn, sid = inv["device_sn"], inv["station_id"]
+    days = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
+    print(f"과거 데이터 가져오기: {days[0]} ~ {days[-1]} ({len(days)}일)")
+
+    # 1) 일 합계
+    api_daily: dict[str, dict] = {}
+    for i in range(0, len(days), 31):
+        a, b = days[i], days[min(i + 30, len(days) - 1)]
+        got = {}
+        try:
+            res = client.device_history_daily(sn, a, b)
+            got = _daily_from(res)
+            if not got:
+                print(f"   일 합계(장비) {a}~{b}: 0일 · 응답 구조 {_shape(res)}")
+        except ApiError as e:
+            print(f"   일 합계(장비) {a}~{b} 실패: {e}")
+        if len(got) < (datetime.strptime(b, "%Y-%m-%d") - datetime.strptime(a, "%Y-%m-%d")).days + 1:
+            try:
+                res = client.station_history_daily(sid, a, b)
+                st = _daily_from(res)
+                for d, rec in st.items():
+                    got.setdefault(d, rec)
+                if not st:
+                    print(f"   일 합계(발전소) {a}~{b}: 0일 · 응답 구조 {_shape(res)}")
+            except ApiError as e:
+                print(f"   일 합계(발전소) {a}~{b} 실패: {e}")
+        api_daily.update(got)
+        print(f"   일 합계 {a}~{b}: {len(got)}일")
+
+    # 2) 5분 곡선
+    points = history_points()
+    total_added, filled_days, empty_days = 0, 0, []
+    row_daily: dict[str, dict] = {}
+    for day in days:
+        path = HIST / f"{day}.json"
+        old = read_json(path, [])
+        if len(old) >= FULL_DAY_ROWS and not force:
+            print(f"   {day}: 이미 {len(old)}행 → 건너뜀")
+            rows = old
+        else:
+            new = []
+            try:
+                res = client.device_history_frames(sn, day, points)
+                new = _frames_from(res, day)
+                if not new and _entries(res):
+                    print(f"   {day}: 응답은 있으나 읽은 행 0 · 응답 구조 {_shape(res)}")
+            except ApiError as e:
+                # 측정 항목을 한 번에 너무 많이 보내 거절된 경우를 대비해 4개씩 나눠 다시 받는다
+                print(f"   {day}: 한 번에 조회 실패 ({str(e)[:120]}) → 나눠서 재시도")
+                by_dt: dict[str, dict] = {}
+                for j in range(0, len(points), 4):
+                    try:
+                        part = client.device_history_frames(sn, day, points[j:j + 4])
+                    except ApiError as e2:
+                        print(f"      {points[j:j + 4]} 실패: {str(e2)[:120]}")
+                        continue
+                    for e3 in _entries(part):
+                        if isinstance(e3, dict) and _entry_time(e3) is not None:
+                            k = _entry_time(e3).isoformat()
+                            by_dt.setdefault(k, {"time": _entry_time(e3).timestamp(), "itemList": []})
+                            by_dt[k]["itemList"] += [{"key": kk, "value": vv} for kk, vv in _entry_values(e3).items()]
+                new = _frames_from({"dataList": list(by_dt.values())}, day)
+            rows, added = merge_rows(old, new)
+            if added:
+                write_json(path, rows)
+                total_added += added
+                filled_days += 1
+            if not rows:
+                empty_days.append(day)
+            print(f"   {day}: 받은 {len(new)}행 · 추가 {added}행 · 합계 {len(rows)}행")
+        # 행에 남은 '오늘 누적' 최대값 = 그날 합계 (API 일 합계가 없을 때 대체)
+        rec = {}
+        for k in ("pv_today_kwh", "load_today_kwh", "charge_today_kwh", "discharge_today_kwh"):
+            vals = [r.get(k) for r in rows if isinstance(r.get(k), (int, float))]
+            if vals:
+                rec[k] = max(vals)
+        if rec:
+            row_daily[day] = rec
+
+    # 3) daily.json 병합: 지난 날은 API 일 합계 우선, 오늘은 기존처럼 최대값 유지
+    daily = read_json(DATA / "daily.json", {})
+    today_s = today.strftime("%Y-%m-%d")
+    touched = 0
+    for day in days:
+        src = api_daily.get(day) or row_daily.get(day)
+        if not src:
+            continue
+        entry = dict(daily.get(day, {}))
+        for k, v in src.items():
+            entry[k] = max(v, entry.get(k) or 0) if day == today_s else v
+        entry.setdefault("last", None)
+        if day != today_s:
+            entry["src"] = "api" if day in api_daily else "rows"
+        if entry != daily.get(day):
+            daily[day] = entry
+            touched += 1
+    if touched:
+        cutoff = (today - timedelta(days=DAILY_KEEP_DAYS)).strftime("%Y-%m-%d")
+        write_json(DATA / "daily.json", {d: v for d, v in sorted(daily.items()) if d >= cutoff})
+    print(f"[OK] 완료: 5분 데이터 {filled_days}일에 {total_added}행 추가 · 일 합계 {touched}일 갱신"
+          + (f" · 데이터 없는 날 {len(empty_days)}일 ({empty_days[0]} 등)" if empty_days else ""))
+    return 0
+
+
 # ───────────────────────── 설정 확인 모드 ─────────────────────────
 def check() -> int:
     init_crypto()
@@ -612,4 +975,7 @@ if __name__ == "__main__":
         sys.exit(check())
     if arg == "--points":
         sys.exit(points())
+    if arg == "--backfill":
+        rest = [a for a in sys.argv[2:] if a != "--force"]
+        sys.exit(backfill(rest[0] if rest else "", rest[1] if len(rest) > 1 else "", "--force" in sys.argv))
     sys.exit(collect())

@@ -51,12 +51,22 @@
   .stat .s{font-size:12px;color:var(--mut);margin-top:4px}
 
   section{margin-top:14px}
-  .phead{display:flex;justify-content:space-between;align-items:baseline;padding:14px 20px 0}
+  .phead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:14px 20px 0}
   .phead h2{margin:0;font-size:13.5px;font-weight:600}
   .legend{display:flex;gap:14px;color:var(--mut);font-size:12px}
   .legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px}
   .chart{position:relative;height:280px;padding:8px 12px 12px}
   .chart.s{height:200px}
+  .chart .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:13px}
+  .chart .empty[hidden]{display:none}
+  .daynav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .daynav h2{margin-right:6px}
+  .daynav .step{font:inherit;font-size:15px;line-height:1;width:26px;height:26px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--sub);cursor:pointer}
+  .daynav .step:hover:not([disabled]){color:var(--ink);border-color:var(--mut)}
+  .daynav .step[disabled]{opacity:.35;cursor:default}
+  .daynav input[type=date]{font:inherit;font-size:12.5px;height:26px;padding:0 6px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--sub);color-scheme:light dark}
+  .daysum{padding:0 20px 14px;color:var(--mut);font-size:12.5px;min-height:1em}
+  #chartDaily{cursor:pointer}
 
   details{padding:0}
   details summary{list-style:none;cursor:pointer;padding:14px 20px;font-size:13.5px;font-weight:600;display:flex;justify-content:space-between}
@@ -131,15 +141,22 @@
 
   <section class="panel">
     <div class="phead">
-      <h2>오늘</h2>
+      <div class="daynav">
+        <h2 id="dayTitle">오늘</h2>
+        <button class="step" id="prevDay" type="button" aria-label="전날">‹</button>
+        <input type="date" id="day" aria-label="날짜 선택">
+        <button class="step" id="nextDay" type="button" aria-label="다음날">›</button>
+        <button class="link" id="toToday" type="button" hidden>오늘로</button>
+      </div>
       <div class="legend"><span><i style="background:var(--pv)"></i>PV</span><span><i style="background:var(--load)"></i>부하</span><span><i style="background:var(--mut)"></i>배터리 %</span></div>
     </div>
-    <div class="chart"><canvas id="chartToday" aria-label="오늘 PV·부하 전력과 배터리 잔량"></canvas></div>
+    <div class="chart"><canvas id="chartToday" aria-label="선택한 날의 PV·부하 전력과 배터리 잔량"></canvas><div class="empty" id="dayEmpty" hidden>이 날짜의 기록이 없습니다</div></div>
+    <div class="daysum num" id="daySum"></div>
   </section>
 
   <section class="panel">
     <div class="phead">
-      <h2>최근 30일</h2>
+      <h2>최근 30일 <span style="color:var(--mut);font-weight:400;font-size:12px">· 막대를 누르면 그날 그래프</span></h2>
       <div class="legend"><span><i style="background:var(--pv)"></i>발전 kWh</span><span><i style="background:var(--load)"></i>소비 kWh</span></div>
     </div>
     <div class="chart s"><canvas id="chartDaily" aria-label="최근 30일 일간 발전량과 소비량"></canvas></div>
@@ -200,14 +217,23 @@
   async function keyOk(key){
     try{ return (await decryptEnv(META.check, 'check', key)) === CHECK_TEXT; }catch(e){ return false; }
   }
+  // 파일 형식: 통째(latest) · 행별(history, AAD 경로#row) · 날짜별(daily, AAD 경로#날짜)
+  const ROWS_TAG = 'aesgcm-rows-v1', MAP_TAG = 'aesgcm-map-v1';
   async function getJSON(path){
     const obj = await rawFetch(path);
-    if(obj && obj.enc === ENC_TAG){
-      if(!KEY) throw new Error('locked');
-      try{ return JSON.parse(await decryptEnv(obj, path)); }
-      catch(e){ showLock('비밀번호가 바뀌었거나 데이터를 풀 수 없습니다. 다시 입력하세요.'); throw e; }
-    }
-    return obj;
+    const tag = obj && obj.enc;
+    if(tag !== ENC_TAG && tag !== ROWS_TAG && tag !== MAP_TAG) return obj;
+    if(!KEY) throw new Error('locked');
+    try{
+      if(tag === ROWS_TAG)
+        return Promise.all((obj.rows||[]).map(async e => JSON.parse(await decryptEnv(e, path+'#row'))));
+      if(tag === MAP_TAG){
+        const ks = Object.keys(obj.items||{});
+        const vs = await Promise.all(ks.map(async k => JSON.parse(await decryptEnv(obj.items[k], path+'#'+k))));
+        return Object.fromEntries(ks.map((k,i) => [k, vs[i]]));
+      }
+      return JSON.parse(await decryptEnv(obj, path));
+    }catch(e){ showLock('비밀번호가 바뀌었거나 데이터를 풀 수 없습니다. 다시 입력하세요.'); throw e; }
   }
   function showLock(msg){
     KEY = null; store.del(storeKey());
@@ -290,12 +316,14 @@
   }
 
   function drawDaily(daily){
+    DAILY = daily;
     const days = Object.keys(daily).sort().slice(-30);
     const o = baseOpts();
     o.scales = {
       x:{grid:{display:false}, border:{display:false}, ticks:{maxTicksLimit:innerWidth<760?5:10, maxRotation:0, callback:(v,i)=>days[i].slice(5).replace('-','/')}},
       y:{beginAtZero:true, border:{display:false}, ticks:{maxTicksLimit:4}},
     };
+    o.onClick = (ev, els) => { if(els.length) selectDay(days[els[0].index]); };
     if(chartDaily) chartDaily.destroy();
     chartDaily = new Chart($('chartDaily'), {type:'bar', data:{labels:days, datasets:[
       {label:'발전', data:days.map(d=>daily[d].pv_today_kwh??null), backgroundColor:css('--pv'), borderRadius:2, maxBarThickness:14},
@@ -307,14 +335,48 @@
     try{ const L = await getJSON('data/latest.json'); setStatus(L); setValues(L); }
     catch(e){ $('online').textContent='데이터 없음'; $('dot').className='dot bad'; console.warn(e); }
   }
+  // ── 날짜 선택 (기본: 오늘, 오늘 기록이 아직 없으면 어제) ──
+  let VIEW = null, DAILY = {};
+  const shiftDay = (d, n) => { const x = new Date(d+'T00:00:00Z'); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); };
+  const dayLabel = d => d === kstDay() ? '오늘' : d === kstDay(-1) ? '어제' : `${+d.slice(5,7)}월 ${+d.slice(8,10)}일`;
+  async function loadDay(d){
+    try{ return await getJSON('data/history/'+d+'.json'); }
+    catch(e){ if(e.message === 'locked') throw e; return null; }   // 파일 없음(404) = 기록 없음
+  }
+  async function showDay(d, rows){
+    VIEW = d;
+    $('day').value = d; $('day').max = kstDay();
+    $('dayTitle').textContent = dayLabel(d);
+    $('nextDay').disabled = d >= kstDay();
+    $('toToday').hidden = d >= kstDay(-1);
+    if(rows === undefined) rows = await loadDay(d);
+    rows = rows || [];
+    $('dayEmpty').hidden = rows.length > 0;
+    $('chartToday').style.visibility = rows.length ? '' : 'hidden';
+    drawToday(rows);
+    const s = DAILY[d] || {}, last = rows.length ? rows[rows.length-1] : {};
+    const pv = s.pv_today_kwh ?? last.pv_today_kwh, ld = s.load_today_kwh ?? last.load_today_kwh;
+    const ch = s.charge_today_kwh ?? last.charge_today_kwh, dc = s.discharge_today_kwh ?? last.discharge_today_kwh;
+    $('daySum').textContent = rows.length || s.pv_today_kwh !== undefined
+      ? `발전 ${fmt(pv,1)} kWh · 소비 ${fmt(ld,1)} kWh · 충전 ${fmt(ch,1)} / 방전 ${fmt(dc,1)} kWh · ${rows.length}개 시점` : '';
+  }
+  function selectDay(d){ if(d && d <= kstDay()) showDay(d).catch(e => console.warn(e)); }
+  $('prevDay').addEventListener('click', () => selectDay(shiftDay(VIEW || kstDay(), -1)));
+  $('nextDay').addEventListener('click', () => selectDay(shiftDay(VIEW || kstDay(), 1)));
+  $('toToday').addEventListener('click', () => selectDay(kstDay()));
+  $('day').addEventListener('change', e => selectDay(e.target.value));
+
   async function refreshHistory(){
-    try{
-      let rows = [];
-      try{ rows = await getJSON('data/history/'+kstDay()+'.json'); }
-      catch(e){ rows = await getJSON('data/history/'+kstDay(-1)+'.json').catch(()=>[]); }
-      drawToday(rows);
-    }catch(e){ console.warn(e); }
     try{ drawDaily(await getJSON('data/daily.json')); }catch(e){ console.warn(e); }
+    try{
+      if(VIEW === null){                       // 처음: 오늘 → 없으면 어제
+        let rows = await loadDay(kstDay()), d = kstDay();
+        if(!rows || !rows.length){ const y = await loadDay(kstDay(-1)); if(y && y.length){ rows = y; d = kstDay(-1); } }
+        await showDay(d, rows);
+      }else if(VIEW >= kstDay(-1)){            // 오늘·어제를 보고 있을 때만 자동 갱신
+        await showDay(VIEW);
+      }
+    }catch(e){ console.warn(e); }
   }
 
   let started = false;

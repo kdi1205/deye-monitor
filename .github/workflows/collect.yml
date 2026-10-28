@@ -20,11 +20,23 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
+    env:
+      DEYE_APP_ID: ${{ secrets.DEYE_APP_ID }}
+      DEYE_APP_SECRET: ${{ secrets.DEYE_APP_SECRET }}
+      DEYE_EMAIL: ${{ secrets.DEYE_EMAIL }}
+      DEYE_PASSWORD: ${{ secrets.DEYE_PASSWORD }}
+      DEYE_REGION: ${{ vars.DEYE_REGION || 'eu' }}
+      DEYE_STATION_ID: ${{ vars.DEYE_STATION_ID }}
+      DEYE_DEVICE_SN: ${{ vars.DEYE_DEVICE_SN }}
+      DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+      DATA_PASSPHRASE_OLD: ${{ secrets.DATA_PASSPHRASE_OLD }}
+      DEYE_REQUIRE_ENCRYPTION: "1"       # 비밀번호가 없으면 평문으로 쓰지 않고 실패
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
         with:
+          ref: main                    # 대기열에서 늦게 시작해도 '지금' 최신 main 을 받는다 (예약 시점의 옛 커밋 X)
           fetch-depth: 1
 
       - name: 오늘 날짜 (캐시 키)
@@ -43,37 +55,29 @@ jobs:
         run: python3 -m pip install --quiet --disable-pip-version-check cryptography==46.0.7
 
       - name: 수집 실행
-        env:
-          DEYE_APP_ID: ${{ secrets.DEYE_APP_ID }}
-          DEYE_APP_SECRET: ${{ secrets.DEYE_APP_SECRET }}
-          DEYE_EMAIL: ${{ secrets.DEYE_EMAIL }}
-          DEYE_PASSWORD: ${{ secrets.DEYE_PASSWORD }}
-          DEYE_REGION: ${{ vars.DEYE_REGION || 'eu' }}
-          DEYE_STATION_ID: ${{ vars.DEYE_STATION_ID }}
-          DEYE_DEVICE_SN: ${{ vars.DEYE_DEVICE_SN }}
-          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
-          DATA_PASSPHRASE_OLD: ${{ secrets.DATA_PASSPHRASE_OLD }}
-          DEYE_REQUIRE_ENCRYPTION: "1"       # 비밀번호가 없으면 평문으로 쓰지 않고 실패
         run: python3 collector.py
 
       - name: 변경분 커밋
-        id: commit
         run: |
           git config user.name "deye-collector"
           git config user.email "actions@users.noreply.github.com"
           git add data/
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "변경 없음"
-          else
+          if git diff --cached --quiet; then echo "변경 없음"; exit 0; fi
+          git commit -q -m "data: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
+          for i in 1 2 3; do
+            if git push -q; then echo "push 완료"; exit 0; fi
+            # 그사이 다른 실행이 먼저 올렸다 → 최신 main 위에서 다시 수집 (암호화 파일은 자동 병합이 안 된다)
+            echo "원격이 앞서 있음 → 최신 상태에서 다시 수집 ($i/3)"
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            python3 collector.py
+            git add data/
+            if git diff --cached --quiet; then echo "변경 없음"; exit 0; fi
             git commit -q -m "data: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
-            # 다른 실행과 겹쳤을 때를 대비해 재시도
-            for i in 1 2 3; do
-              git pull --rebase -q && git push -q && break
-              sleep 5
-            done
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
+          done
+          # 여기까지 오면 이 실행의 데이터는 낡았을 수 있으므로 배포하지 않는다
+          echo "::error::push 3회 실패 — 낡은 데이터를 배포하지 않도록 이번 실행을 멈춥니다"
+          exit 1
 
       - name: Pages 아티팩트 준비
         run: |

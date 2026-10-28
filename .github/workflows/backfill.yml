@@ -31,10 +31,25 @@ jobs:
   backfill:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      DEYE_APP_ID: ${{ secrets.DEYE_APP_ID }}
+      DEYE_APP_SECRET: ${{ secrets.DEYE_APP_SECRET }}
+      DEYE_EMAIL: ${{ secrets.DEYE_EMAIL }}
+      DEYE_PASSWORD: ${{ secrets.DEYE_PASSWORD }}
+      DEYE_REGION: ${{ vars.DEYE_REGION || 'eu' }}
+      DEYE_STATION_ID: ${{ vars.DEYE_STATION_ID }}
+      DEYE_DEVICE_SN: ${{ vars.DEYE_DEVICE_SN }}
+      DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+      DATA_PASSPHRASE_OLD: ${{ secrets.DATA_PASSPHRASE_OLD }}
+      DEYE_REQUIRE_ENCRYPTION: "1"
+      IN_START: ${{ inputs.start }}
+      IN_END: ${{ inputs.end }}
+      IN_FORCE: ${{ inputs.force }}
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 1
 
       - name: 오늘 날짜 (캐시 키)
@@ -53,22 +68,9 @@ jobs:
         run: python3 -m pip install --quiet --disable-pip-version-check cryptography==46.0.7
 
       - name: 과거 데이터 조회
-        env:
-          DEYE_APP_ID: ${{ secrets.DEYE_APP_ID }}
-          DEYE_APP_SECRET: ${{ secrets.DEYE_APP_SECRET }}
-          DEYE_EMAIL: ${{ secrets.DEYE_EMAIL }}
-          DEYE_PASSWORD: ${{ secrets.DEYE_PASSWORD }}
-          DEYE_REGION: ${{ vars.DEYE_REGION || 'eu' }}
-          DEYE_STATION_ID: ${{ vars.DEYE_STATION_ID }}
-          DEYE_DEVICE_SN: ${{ vars.DEYE_DEVICE_SN }}
-          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
-          DATA_PASSPHRASE_OLD: ${{ secrets.DATA_PASSPHRASE_OLD }}
-          DEYE_REQUIRE_ENCRYPTION: "1"
-          IN_START: ${{ inputs.start }}
-          IN_END: ${{ inputs.end }}
-          IN_FORCE: ${{ inputs.force }}
         run: |
           if [ "$IN_FORCE" = "true" ]; then F="--force"; else F=""; fi
+          echo "F=$F" >> "$GITHUB_ENV"
           python3 collector.py --backfill "$IN_START" "$IN_END" $F
 
       - name: 커밋
@@ -76,18 +78,20 @@ jobs:
           git config user.name "deye-collector"
           git config user.email "actions@users.noreply.github.com"
           git add data/
-          if git diff --cached --quiet; then
-            echo "추가된 데이터 없음"
-          else
+          if git diff --cached --quiet; then echo "추가된 데이터 없음"; exit 0; fi
+          git commit -q -m "backfill: ${IN_START:-auto} ~ ${IN_END:-today}"
+          for i in 1 2 3; do
+            if git push -q; then echo "push 완료"; exit 0; fi
+            echo "원격이 앞서 있음 → 최신 상태에서 다시 채움 ($i/3)"
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            python3 collector.py --backfill "$IN_START" "$IN_END" $F
+            git add data/
+            if git diff --cached --quiet; then echo "추가된 데이터 없음"; exit 0; fi
             git commit -q -m "backfill: ${IN_START:-auto} ~ ${IN_END:-today}"
-            for i in 1 2 3; do
-              git pull --rebase -q && git push -q && break
-              sleep 5
-            done
-          fi
-        env:
-          IN_START: ${{ inputs.start }}
-          IN_END: ${{ inputs.end }}
+          done
+          echo "::error::push 3회 실패 — 이번 실행은 배포하지 않습니다"
+          exit 1
 
       - name: Pages 아티팩트 준비
         run: |

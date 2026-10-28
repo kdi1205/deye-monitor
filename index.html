@@ -270,7 +270,7 @@
                           : (+r.t.slice(0,2))*60 + (+r.t.slice(3,5));
   const clock = m => `${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(Math.round(m%60)).padStart(2,'0')}`;
   const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const GAP_MIN = 15;
+  const GAP_MIN = 15;   // 기본 끊김 기준(분). 실제 수집 간격이 길면 그에 맞춰 늘린다
   const DUR = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 300;   // 누른 뒤 전환 0.3초
   let USER_ACT = false;   // 사용자가 누른 변경인지 (자동 새로고침은 전환 없이 바로)   // 이보다 긴 간격 = 수집 끊김
 
@@ -485,25 +485,35 @@
     }
   };
   // 행 → 점 배열. 끊김에서 null 을 넣어 선을 끊는다
-  function series(rows, f){
+  // 그날 실제 수집 간격(중앙값)을 보고 끊김 기준을 정한다.
+  // GitHub 예약 실행이 30분 넘게 밀리는 날도 있어서, 고정 15분이면 모든 점이 끊겨 그래프가 비어 보인다.
+  function gapLimit(rows){
+    const d = [];
+    for(let i = 1; i < rows.length; i++) d.push(minOf(rows[i]) - minOf(rows[i-1]));
+    if(!d.length) return GAP_MIN;
+    d.sort((a,b) => a-b);
+    return Math.max(GAP_MIN, d[Math.floor(d.length/2)] * 2.5);
+  }
+  function series(rows, f, gap){
     const out = []; let prev = null;
     for(const r of rows){
       const m = minOf(r);
-      if(prev !== null && m - prev > GAP_MIN) out.push({x:(m+prev)/2, y:null});
+      if(prev !== null && m - prev > gap) out.push({x:(m+prev)/2, y:null});
       out.push({x:m, y: f(r)}); prev = m;
     }
     return out;
   }
-  function gapsOf(rows, isToday){
+  function gapsOf(rows, isToday, gap){
     const g = []; let prev = null;
-    for(const r of rows){ const m = minOf(r); if(prev !== null && m - prev > GAP_MIN) g.push([prev, m]); prev = m; }
-    if(isToday && prev !== null && kstMin() - prev > 20) g.push([prev, kstMin()]);
+    for(const r of rows){ const m = minOf(r); if(prev !== null && m - prev > gap) g.push([prev, m]); prev = m; }
+    if(isToday && prev !== null && kstMin() - prev > Math.max(20, gap)) g.push([prev, kstMin()]);
     return g;
   }
 
   let cMain, cDaily;
   function drawDay(rows, isToday){
-    const gaps = gapsOf(rows, isToday), now = isToday ? kstMin() : null;
+    const gap = gapLimit(rows), gaps = gapsOf(rows, isToday, gap), now = isToday ? kstMin() : null;
+    const dot = gap > GAP_MIN ? 2 : 0;   // 점이 듬성듬성하면 점도 찍어 위치를 보이게
     const o = baseOpts();
     o.scales = { x: timeAxis(true), y:{beginAtZero:true, border:{display:false}, ticks:{maxTicksLimit:5, callback:v=>fmt(v)+' W'}, afterFit:s=>{s.width=58}},
       y2:{position:'right', min:0, max:100, border:{display:false}, grid:{display:false},
@@ -514,9 +524,9 @@
     const pv = css('--pv'), bat = css('--bat');
     // 그리는 순서: 배터리 면(맨 아래) → PV 면 → 부하 선(맨 위)
     const sets = [
-      {label:'부하', data:series(rows, r=>r.load_power_w), borderColor:css('--load'), yAxisID:'y', spanGaps:false, order:1},
-      {label:'PV', data:series(rows, r=>r.pv_power_w), borderColor:pv, backgroundColor:pv+'30', fill:'origin', yAxisID:'y', spanGaps:false, order:2},
-      {label:'배터리', data:series(rows, r=>r.battery_soc_pct), borderColor:bat, borderWidth:1.2, backgroundColor:bat+'22',
+      {label:'부하', data:series(rows, r=>r.load_power_w, gap), borderColor:css('--load'), pointRadius:dot, yAxisID:'y', spanGaps:false, order:1},
+      {label:'PV', data:series(rows, r=>r.pv_power_w, gap), borderColor:pv, pointRadius:dot, backgroundColor:pv+'30', fill:'origin', yAxisID:'y', spanGaps:false, order:2},
+      {label:'배터리', data:series(rows, r=>r.battery_soc_pct, gap), borderColor:bat, borderWidth:1.2, backgroundColor:bat+'22',
        fill:'origin', yAxisID:'y2', spanGaps:false, tension:0.2, order:3},
     ];
     if(cMain && USER_ACT && DUR){

@@ -8,7 +8,8 @@ Deye Cloud OpenAPI 수집기 — 5kW 목업 모니터링
   3. 발전소 최신값(/station/latest) + 인버터 최신값(/device/latest) 조회
   4. data/latest.json 덮어쓰기
   5. data/history/YYYY-MM-DD.json 에 한 행 추가 (KST 기준 날짜)
-  6. data/daily.json 일간 집계 갱신 (최근 90일)
+  6. data/daily.json 일간 집계 갱신
+  7. Deye 에 남은 오늘 5분 기록으로 빈 시각 보충 (GitHub 예약 실행이 밀려도 하루 곡선이 촘촘하게)
   실패하면 이전 latest.json 을 유지하고 status 필드에 오류를 기록한다.
 
 환경변수 (GitHub Secrets 로 주입):
@@ -278,7 +279,13 @@ class Crypto:
                 env, aad = self._first_env(obj, p)
                 if obj.get("enc") == want[_kind(p)] and (env is None or self._try(env, aad, self.key) is not None):
                     continue
-                plain = self.decode(obj, p)          # 안 풀리면 예외
+                try:
+                    plain = self.decode(obj, p)      # 안 풀리면 예외
+                except ApiError:
+                    if CACHE in p.parents:           # 캐시(토큰·장비 목록)는 다시 받으면 되므로 지운다
+                        p.unlink(missing_ok=True)
+                        continue
+                    raise
             else:
                 plain = obj                          # 평문 → 암호화
             p.write_text(self.encode(plain, p), encoding="utf-8")
@@ -301,7 +308,12 @@ def read_json(path: Path, default):
     if _is_env(obj):
         if CRYPTO is None:
             raise ApiError(f"{_aad(path)} 는 암호화되어 있습니다. DATA_PASSPHRASE 를 설정하세요.")
-        return CRYPTO.decode(obj, path)
+        try:
+            return CRYPTO.decode(obj, path)
+        except ApiError:
+            if CACHE in path.resolve().parents:  # 캐시는 못 풀면 없는 것으로 보고 다시 받는다
+                return default
+            raise
     return obj
 
 
@@ -611,12 +623,16 @@ def collect() -> int:
         write_json(DATA / "latest.json", latest)
         append_history(t0, norm, status)
         update_daily(t0, norm)
+        try:
+            fill_note = fill_recent(client, inv["device_sn"], t0)
+        except Exception as e:  # noqa: BLE001  보충이 실패해도 이번 수집은 성공
+            fill_note = f"기록 보충 실패: {str(e)[:160]}"
         if CRYPTO is not None:
             # 공개 저장소의 Actions 로그는 누구나 볼 수 있으므로 측정값을 찍지 않는다
-            print(f"[OK] {t0:%Y-%m-%d %H:%M} 수집 완료 (암호화 저장, 항목 {len(values)}개, data_age {stale_min}min)")
+            print(f"[OK] {t0:%Y-%m-%d %H:%M} 수집 완료 (암호화 저장, 항목 {len(values)}개, data_age {stale_min}min) · {fill_note}")
         else:
             print(f"[OK] {t0:%Y-%m-%d %H:%M} PV {norm.get('pv_power_w')}W  SOC {norm.get('battery_soc_pct')}%  "
-                  f"Load {norm.get('load_power_w')}W  data_age {stale_min}min  (암호화 꺼짐)")
+                  f"Load {norm.get('load_power_w')}W  data_age {stale_min}min  (암호화 꺼짐) · {fill_note}")
         return 0
     except Exception as e:  # noqa: BLE001
         status["ok"] = False
@@ -809,6 +825,77 @@ def merge_rows(old: list[dict], new: list[dict]) -> tuple[list[dict], int]:
     return rows, len(added)
 
 
+def fetch_frames(client: "DeyeClient", sn: str, day: str, points: list[str], log=print, split: bool = True) -> list[dict]:
+    """/device/history granularity=1 로 하루치 5분 기록을 받아 history 행으로 바꾼다.
+    한 번에 거절되면 4개씩 나눠 다시 받는다. 응답에서 행을 못 읽으면 구조(key 이름만)를 남긴다."""
+    try:
+        res = client.device_history_frames(sn, day, points)
+        new = _frames_from(res, day)
+        if not new and _entries(res):
+            log(f"   {day}: 응답은 있으나 읽은 행 0 · 응답 구조 {_shape(res)}")
+        return new
+    except ApiError as e:
+        if not split:
+            log(f"   {day}: 조회 실패 ({str(e)[:120]})")
+            return []
+        log(f"   {day}: 한 번에 조회 실패 ({str(e)[:120]}) → 나눠서 재시도")
+    by_dt: dict[str, dict] = {}
+    for j in range(0, len(points), 4):
+        try:
+            part = client.device_history_frames(sn, day, points[j:j + 4])
+        except ApiError as e2:
+            log(f"      {points[j:j + 4]} 실패: {str(e2)[:120]}")
+            continue
+        for e3 in _entries(part):
+            if isinstance(e3, dict) and _entry_time(e3) is not None:
+                k = _entry_time(e3).isoformat()
+                by_dt.setdefault(k, {"time": _entry_time(e3).timestamp(), "itemList": []})
+                by_dt[k]["itemList"] += [{"key": kk, "value": vv} for kk, vv in _entry_values(e3).items()]
+    return _frames_from({"dataList": list(by_dt.values())}, day)
+
+
+def day_totals(rows: list[dict]) -> dict:
+    """행에 남은 '오늘 누적' 최대값 = 그날 합계"""
+    rec = {}
+    for k in ("pv_today_kwh", "load_today_kwh", "charge_today_kwh", "discharge_today_kwh"):
+        vals = [r.get(k) for r in rows if isinstance(r.get(k), (int, float))]
+        if vals:
+            rec[k] = max(vals)
+    return rec
+
+
+def fill_recent(client: "DeyeClient", sn: str, t: datetime) -> str:
+    """GitHub 예약 실행은 5분을 지키지 않는다 (새 저장소는 30분 이상 밀리기도 함).
+    그래서 매 수집마다 Deye 에 남아 있는 오늘 5분 기록을 받아 빈 시각을 채운다.
+    새벽 6시 전에는 어제 기록이 덜 찼으면 어제도 한 번 채운다. 실패해도 수집은 성공으로 둔다."""
+    points = history_points()
+    today = t.strftime("%Y-%m-%d")
+    days = [today]
+    yday = (t - timedelta(days=1)).strftime("%Y-%m-%d")
+    if t.hour < 6 and len(read_json(HIST / f"{yday}.json", [])) < FULL_DAY_ROWS:
+        days.append(yday)
+    notes = []
+    for day in days:
+        path = HIST / f"{day}.json"
+        quiet: list[str] = []
+        new = fetch_frames(client, sn, day, points, log=quiet.append, split=False)   # 매 수집이라 호출은 1번만
+        old = read_json(path, [])
+        rows, added = merge_rows(old, new)
+        if added:
+            write_json(path, rows)
+            if day != today:
+                daily = read_json(DATA / "daily.json", {})
+                entry = dict(daily.get(day, {}))
+                for k, v in day_totals(rows).items():
+                    entry[k] = max(v, entry.get(k) or 0)
+                daily[day] = entry
+                write_json(DATA / "daily.json", dict(sorted(daily.items())))
+        notes.append(f"{'오늘' if day == today else '어제'} +{added}행(합계 {len(rows)})")
+        if quiet:
+            notes.append("기록 조회 문제: " + quiet[0].strip()[:160])
+    return " · ".join(notes)
+
+
 def _parse_day(s: str, default: datetime) -> datetime:
     s = (s or "").strip()
     if not s:
@@ -872,28 +959,7 @@ def backfill(start_s: str, end_s: str, force: bool) -> int:
             print(f"   {day}: 이미 {len(old)}행 → 건너뜀")
             rows = old
         else:
-            new = []
-            try:
-                res = client.device_history_frames(sn, day, points)
-                new = _frames_from(res, day)
-                if not new and _entries(res):
-                    print(f"   {day}: 응답은 있으나 읽은 행 0 · 응답 구조 {_shape(res)}")
-            except ApiError as e:
-                # 측정 항목을 한 번에 너무 많이 보내 거절된 경우를 대비해 4개씩 나눠 다시 받는다
-                print(f"   {day}: 한 번에 조회 실패 ({str(e)[:120]}) → 나눠서 재시도")
-                by_dt: dict[str, dict] = {}
-                for j in range(0, len(points), 4):
-                    try:
-                        part = client.device_history_frames(sn, day, points[j:j + 4])
-                    except ApiError as e2:
-                        print(f"      {points[j:j + 4]} 실패: {str(e2)[:120]}")
-                        continue
-                    for e3 in _entries(part):
-                        if isinstance(e3, dict) and _entry_time(e3) is not None:
-                            k = _entry_time(e3).isoformat()
-                            by_dt.setdefault(k, {"time": _entry_time(e3).timestamp(), "itemList": []})
-                            by_dt[k]["itemList"] += [{"key": kk, "value": vv} for kk, vv in _entry_values(e3).items()]
-                new = _frames_from({"dataList": list(by_dt.values())}, day)
+            new = fetch_frames(client, sn, day, points)
             rows, added = merge_rows(old, new)
             if added:
                 write_json(path, rows)
@@ -902,12 +968,7 @@ def backfill(start_s: str, end_s: str, force: bool) -> int:
             if not rows:
                 empty_days.append(day)
             print(f"   {day}: 받은 {len(new)}행 · 추가 {added}행 · 합계 {len(rows)}행")
-        # 행에 남은 '오늘 누적' 최대값 = 그날 합계 (API 일 합계가 없을 때 대체)
-        rec = {}
-        for k in ("pv_today_kwh", "load_today_kwh", "charge_today_kwh", "discharge_today_kwh"):
-            vals = [r.get(k) for r in rows if isinstance(r.get(k), (int, float))]
-            if vals:
-                rec[k] = max(vals)
+        rec = day_totals(rows)   # API 일 합계가 없을 때 대체
         if rec:
             row_daily[day] = rec
 
